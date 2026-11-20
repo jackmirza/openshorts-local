@@ -4452,6 +4452,14 @@ app.include_router(_mcp_server.router)
 import free_tools as _free_tools
 app.include_router(_free_tools.router)
 
+# The local gameplay workspace is explicitly opt-in and never attached in cloud
+# mode. Its files live outside the upstream job-retention sweeps.
+LOCAL_CLIPPER_ENABLED = (not BILLING_ENABLED and
+                         os.environ.get("ENABLE_LOCAL_CLIPPER") == "1")
+if LOCAL_CLIPPER_ENABLED:
+    from local_clips import create_router as _local_clip_router
+    app.include_router(_local_clip_router(os.environ.get("LOCAL_CLIP_DIR", "local-data")))
+
 # Enable CORS for frontend. Cloud mode locks this down to the configured origins;
 # self-host keeps the permissive wildcard it has always used.
 app.add_middleware(
@@ -5656,6 +5664,7 @@ async def get_config(response: Response):
         # Self-host only: tells the dashboard the Gemini key is optional
         # because the moment picker runs on an OpenAI-compatible server.
         "localLlm": None if BILLING_ENABLED else llm_backend.describe(),
+        "localClipper": LOCAL_CLIPPER_ENABLED,
     }
 
 async def _probe_youtube_quality(url: str) -> dict:

@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gameplay clips · OpenShorts Local</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#101214;color:#f5f3ee;font:16px/1.5 system-ui,sans-serif}main{max-width:1160px;margin:auto;padding:36px 24px}a{color:#b8e88a}header{display:flex;justify-content:space-between;gap:20px;align-items:center}.eyebrow{color:#b8e88a;letter-spacing:.13em;font-size:12px;text-transform:uppercase}h1{font-size:clamp(30px,5vw,48px);letter-spacing:-.04em;line-height:1.1;margin:12px 0}p{color:#b6babf}section{background:#1a1e22;border:1px solid #30353b;border-radius:16px;padding:24px;margin-top:24px}.grid{display:grid;grid-template-columns:1.2fr 1fr;gap:24px}video{width:100%;max-height:450px;background:#060708;border-radius:10px}label{display:block;font-size:13px;color:#cbd0d5;margin:14px 0 6px}input,select,button{font:inherit}input,select{background:#101214;color:inherit;border:1px solid #454c54;border-radius:8px;padding:10px;width:100%}button,.button{background:#b8e88a;color:#11210c;border:0;border-radius:8px;padding:12px 18px;cursor:pointer;font-weight:650;text-decoration:none;display:inline-block}button.secondary{background:#30373e;color:#fff}button:disabled{opacity:.45;cursor:wait}.row{display:flex;gap:12px;align-items:end}.row>*{flex:1}.row button{flex:0 0 auto}.muted{font-size:13px;color:#9fa7b0}.clip{padding:16px 0;border-top:1px solid #30353b}.clip:first-child{border-top:0}.results{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:20px}.results video{max-height:480px}.status{padding:12px;border-radius:8px;background:#222c20;color:#d7f5be;white-space:pre-wrap}.error{background:#402629;color:#ffc4bf}[hidden]{display:none!important}input[type=checkbox]{width:auto}#focusWrap{max-width:300px}@media(max-width:760px){main{padding:24px 16px}.grid{grid-template-columns:1fr}.row{flex-wrap:wrap}.row>*{min-width:95px}header{align-items:start}section{padding:18px}}
+</style>
+</head>
+<body><main>
+<header><div><span class="eyebrow">OpenShorts · local workspace</span><h1>Gameplay. Cut to the moment.</h1><p>Choose your moments. Make vertical clips. Keep the footage on your computer.</p></div><a id="aiPickerLink" href="/#app" hidden>AI clip picker ↗</a></header>
+<div class="grid">
+<section><h2>1. Open a recording</h2><p class="muted">Use your recording or a creator-provided file you are allowed to edit. Up to 2 GB.</p>
+<form id="uploadForm"><label for="file">Video file</label><input id="file" type="file" accept="video/*" required><p><button id="uploadButton">Open recording</button></p></form>
+<video id="source" controls preload="metadata" hidden></video><p id="sourceInfo" class="muted"></p>
+<div id="sourceActions" class="row" hidden><button type="button" class="secondary" id="markStart">Use current time as start</button><button type="button" class="secondary" id="markEnd">Use current time as end</button></div>
+</section>
+<section><h2>2. Build your clips</h2><p class="muted">Enter seconds or mm:ss. Each clip can be 1–180 seconds. Moment selection here is manual.</p>
+<div id="ranges"></div><button type="button" id="add" class="secondary">+ Add another clip</button>
+<label for="layout">Vertical framing</label><select id="layout"><option value="fit">Full gameplay + blurred background · keeps the HUD</option><option value="crop">Fill vertical frame · fixed crop</option></select>
+<div id="focusWrap" hidden><label for="focus">Crop focus: left ← → right</label><input id="focus" type="range" min="0" max="100" value="50"></div>
+<label><input id="mute" type="checkbox"> Mute source audio</label>
+<p class="muted">Hook text is optional. This mode creates no automatic speech captions.</p>
+<p><button type="button" id="render" disabled>Create clips</button></p>
+</section></div>
+<section id="progress" hidden><h2>3. Review and download</h2><div id="status" class="status" role="status" aria-live="polite"></div><div id="results" class="results"></div></section>
+<p class="muted">Local timestamp mode uses no AI API or publishing service. Finished clips stay in local-data/jobs until you remove them.</p>
+</main>
+<script>
+let sourceId = null, rendering = false, focusedRange = null;
+const $ = id => document.getElementById(id);
+function message(text, error = false) { $('progress').hidden = false; $('status').textContent = text; $('status').classList.toggle('error', error); }
+function addRange(start = '0', end = '20') {
+  if ($('ranges').children.length >= 15) return;
+  const item = document.createElement('div'); item.className = 'clip';
+  item.innerHTML = '<div class="row"><div><label>Start<input class="start" aria-label="Clip start" inputmode="decimal" required></label></div><div><label>End<input class="end" aria-label="Clip end" inputmode="decimal" required></label></div><button class="secondary remove" type="button" aria-label="Remove clip">×</button></div><label>Hook text (optional)<input class="hook" maxlength="100" placeholder="A hook that fits this moment"></label>';
+  item.querySelector('.start').value = start; item.querySelector('.end').value = end;
+  item.addEventListener('focusin', () => { focusedRange = item; });
+  item.querySelector('.remove').onclick = () => { if ($('ranges').children.length > 1) { item.remove(); focusedRange = $('ranges').lastElementChild; } };
+  $('ranges').append(item); focusedRange = item;
+}
+function seconds(text) {
+  const raw = text.trim();
+  if (!/^\d+(?:\.\d+)?$/.test(raw) && !/^\d+(?::[0-5]\d){1,2}(?:\.\d+)?$/.test(raw)) throw new Error('Use seconds or mm:ss for clip times.');
+  return raw.split(':').reduce((sum, part) => sum * 60 + Number(part), 0);
+}
+async function api(url, options) {
+  const res = await fetch(url, options); const body = await res.json();
+  if (!res.ok) throw new Error(typeof body.detail === 'string' ? body.detail : 'Check the clip times and try again.');
+  return body;
+}
+$('uploadForm').onsubmit = async event => {
+  event.preventDefault(); if (rendering) return;
+  const file = $('file').files[0]; if (!file) return;
+  if (file.size > 2 * 1024 ** 3) { message('Choose a recording smaller than 2 GB.', true); return; }
+  sourceId = null; $('render').disabled = true; $('uploadButton').disabled = true; $('results').replaceChildren();
+  $('source').hidden = true; $('sourceActions').hidden = true; $('sourceInfo').textContent = '';
+  message('Opening recording…');
+  try {
+    const data = new FormData(); data.append('file', file);
+    const result = await api('/api/local-clips/sources', { method: 'POST', body: data });
+    sourceId = result.id; $('source').src = result.video_url; $('source').hidden = false; $('sourceActions').hidden = false;
+    $('sourceInfo').textContent = `${result.name} · ${result.width} × ${result.height} · ${result.duration.toFixed(1)} seconds`;
+    $('ranges').replaceChildren(); addRange('0', String(Math.min(20, result.duration).toFixed(2)));
+    $('render').disabled = false; message('Recording ready. Choose the setup and payoff for each clip.');
+  } catch (error) { message(error.message, true); }
+  finally { $('uploadButton').disabled = false; }
+};
+$('add').onclick = () => addRange();
+$('layout').onchange = () => { $('focusWrap').hidden = $('layout').value !== 'crop'; };
+$('markStart').onclick = () => { if (focusedRange) focusedRange.querySelector('.start').value = $('source').currentTime.toFixed(2); };
+$('markEnd').onclick = () => { if (focusedRange) focusedRange.querySelector('.end').value = $('source').currentTime.toFixed(2); };
+$('render').onclick = async () => {
+  if (!sourceId || rendering) return;
+  try {
+    const clips = [...$('ranges').children].map(item => ({start: seconds(item.querySelector('.start').value), end: seconds(item.querySelector('.end').value), hook: item.querySelector('.hook').value.trim()}));
+    if (clips.some(c => c.end - c.start < 1 || c.end - c.start > 180)) throw new Error('Each clip must be between 1 and 180 seconds.');
+    rendering = true; $('render').disabled = true; $('uploadButton').disabled = true; $('results').replaceChildren();
+    const body = {source_id: sourceId, clips, layout: $('layout').value, focus: Number($('focus').value), mute: $('mute').checked};
+    const job = await api('/api/local-clips/jobs', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    message('Clips queued. You can keep this page open while they render.');
+    while (true) {
+      const state = await api(`/api/local-clips/jobs/${job.id}`);
+      message(`${state.status === 'completed' ? 'Ready' : state.status} · ${state.clips.length}/${clips.length} clips`);
+      if (['failed', 'interrupted'].includes(state.status)) throw new Error(state.error || 'Rendering stopped. Try again.');
+      if (state.status === 'completed') {
+        for (const clip of state.clips) {
+          const card = document.createElement('div'), video = document.createElement('video'), title = document.createElement('p'), link = document.createElement('a');
+          video.controls = true; video.preload = 'metadata'; video.src = clip.url;
+          title.textContent = clip.hook || clip.name; link.href = clip.url; link.download = clip.name; link.className = 'button'; link.textContent = 'Download MP4';
+          card.append(video, title, link); $('results').append(card);
+        }
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1500));
+    }
+  } catch (error) { message(error.message, true); }
+  finally { rendering = false; $('render').disabled = !sourceId; $('uploadButton').disabled = false; }
+};
+addRange();
+fetch('/api/config').then(r => r.json()).then(c => { $('aiPickerLink').hidden = Boolean(c.timestampOnly); }).catch(() => {});
+</script></body></html>

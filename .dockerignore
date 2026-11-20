@@ -9,6 +9,8 @@ __pycache__
 *.so
 .Python
 .venv
+.venv-local
+.venv-checks
 venv/
 ENV/
 .eggs/
@@ -40,6 +42,8 @@ videos/
 
 # Runtime caches from the bind-mounted /app directory
 .cache/
+local-data/
+.local-checks/
 
 # Secrets — never bake real credentials into the image (repo is public,
 # image may be pushed to a registry). Runtime env comes via compose env_file.

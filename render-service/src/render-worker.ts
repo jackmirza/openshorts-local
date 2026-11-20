@@ -45,6 +45,7 @@ export async function executeRender(params: RenderParams): Promise<void> {
 
     // Select the composition with the provided input props
     const composition = await selectComposition({
+      browserExecutable: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       serveUrl: bundleLocation,
       id: "ShortVideo",
       inputProps: props,
@@ -66,6 +67,8 @@ export async function executeRender(params: RenderParams): Promise<void> {
 
     // Render the video
     await renderMedia({
+      browserExecutable: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+      inputProps: props,
       composition,
       serveUrl: bundleLocation,
       codec: "h264",

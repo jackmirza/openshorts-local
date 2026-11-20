@@ -1,6 +1,6 @@
 # Base images are pinned by digest (@sha256): the tag is only a label.
 # To update one: docker buildx imagetools inspect <tag> and paste the new digest.
-FROM node:18-bookworm-slim@sha256:f9ab18e354e6855ae56ef2b290dd225c1e51a564f87584b9bd21dd651838830e
+FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
 
 # Install Chromium and FFmpeg for Remotion rendering
 RUN apt-get update && \

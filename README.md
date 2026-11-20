@@ -1,5 +1,9 @@
 # OpenShorts.app
 
+> **Windows gameplay setup in this fork:** see [Local clipping on Windows](docs/local-clipping-windows.md).
+> The lightweight workspace cuts your chosen moments and exports vertical MP4s locally, without an AI API.
+> The original AI application remains available as an optional Docker stack. [Audit notes](docs/local-setup-audit.md).
+
 **The open-source OpusClip alternative.** Turn long videos into viral 9:16 Shorts, TikToks and Reels. Self-host free (MIT) or use the hosted cloud.
 
 | | OpenShorts | OpusClip | Vizard | Klap |

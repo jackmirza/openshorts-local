@@ -24,6 +24,7 @@ test(
   { timeout: BUNDLE_TIMEOUT_MS },
   async () => {
     const composition = await selectComposition({
+      browserExecutable: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       serveUrl: getBundleLocation(),
       id: "ShortVideo",
       inputProps: {
@@ -48,6 +49,7 @@ test(
   { timeout: BUNDLE_TIMEOUT_MS },
   async () => {
     const composition = await selectComposition({
+      browserExecutable: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       serveUrl: getBundleLocation(),
       id: "ShortVideo",
       inputProps: { videoUrl: "" },

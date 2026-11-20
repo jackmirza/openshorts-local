@@ -1,0 +1,103 @@
+name: openshorts-local
+
+# Standalone local stack. Do not combine with the upstream development compose:
+# mounting the repository over /app hides the image's downloaded YOLO weights.
+services:
+  backend:
+    build:
+      context: .
+      args:
+        GPU: "1"
+        INCLUDE_YOUTUBE_DOWNLOADS: "0"
+    environment:
+      BILLING_ENABLED: "0"
+      ENABLE_LOCAL_CLIPPER: "1"
+      LOCAL_CLIP_DIR: /app/local-data
+      LLM_BASE_URL: http://ollama:11434/v1
+      LLM_MODEL: qwen2.5:7b
+      LLM_TIMEOUT: "900"
+      TRANSCRIBE_BACKEND: whisper
+      WHISPER_MODEL: large-v3-turbo
+      WHISPER_DEVICE: cuda
+      WHISPER_COMPUTE: int8_float16
+      ASR_GPU_CONCURRENCY: "1"
+      ASR_HOST_SLOTS: "1"
+      MAX_CONCURRENT_JOBS: "1"
+      CLIP_WORKERS: "1"
+      JOB_NVENC_SLOTS: "1"
+      FFMPEG_ENCODER: auto
+      AUTO_LAYOUT: "0"
+      SUBTITLE_BAND_CHECK: "0"
+      HOOK_GROUNDING: "0"
+      DISABLE_YOUTUBE_URL: "true"
+      AWS_EC2_METADATA_DISABLED: "true"
+      HF_HOME: /app/.cache/huggingface
+      # External services are absent unless deliberately configured later.
+      GEMINI_API_KEY: ""
+      UPLOAD_POST_API_KEY: ""
+      AWS_ACCESS_KEY_ID: ""
+      AWS_SECRET_ACCESS_KEY: ""
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./output:/app/output
+      - ./uploads:/app/uploads
+      - ./local-data:/app/local-data
+      - huggingface:/app/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, video, utility]
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./dashboard
+      target: dev
+    ports:
+      - "127.0.0.1:5175:5173"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # The model is loaded only on demand and released after each request, so it
+  # does not remain in the laptop's 8 GB VRAM during transcription/rendering.
+  ollama:
+    image: ollama/ollama:0.40.16
+    environment:
+      OLLAMA_CONTEXT_LENGTH: "16384"
+      OLLAMA_KEEP_ALIVE: "0"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_FLASH_ATTENTION: "1"
+      OLLAMA_KV_CACHE_TYPE: q8_0
+    volumes:
+      - ollama:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  renderer:
+    build:
+      context: .
+      dockerfile: render-service/Dockerfile
+    volumes:
+      - ./output:/output
+    environment:
+      REMOTION_BUNDLE_PATH: /app/remotion
+      OUTPUT_DIR: /output
+      PORT: "3100"
+    restart: unless-stopped
+
+volumes:
+  huggingface:
+  ollama:

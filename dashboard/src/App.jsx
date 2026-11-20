@@ -287,7 +287,7 @@ const pollJob = async (jobId) => {
 
 function App() {
   // Cloud auth/billing session (inert when billing is disabled).
-  const { billingEnabled, isManaged, isSignedIn, me, plan, refreshMe, jobRetentionSeconds, localLlm, loading: authLoading } = useAuth();
+  const { billingEnabled, isManaged, isSignedIn, me, plan, refreshMe, jobRetentionSeconds, localLlm, localClipper, loading: authLoading } = useAuth();
   const [showLogin, setShowLogin] = useState(false);
   const [showTopUp, setShowTopUp] = useState(false);
   // Free plan: "want the watermark off?" once per job, when the clips land.
@@ -1020,7 +1020,7 @@ function App() {
   // A self-hosted server running the moment picker on a local LLM
   // (LLM_BASE_URL) does not need a Gemini key for the core pipeline.
   const geminiOk = !!apiKey || !!localLlm;
-  const keysMissing = !billingEnabled && (!geminiOk || !uploadPostKey);
+  const keysMissing = !billingEnabled && !geminiOk;
   const needsPlan = billingEnabled && !isManaged;   // hosted, signed-out or no active plan/trial
 
   // Fresh sign-up: Clip Generator tutorial (AuthContext set os_show_clip_tutorial
@@ -2292,6 +2292,15 @@ function App() {
                 </div>
 
                 <MediaInput onProcess={handleProcess} isProcessing={status === 'processing'} />
+
+                {localClipper && (
+                  <p className="text-sm text-muted">
+                    Gameplay without speech?{' '}
+                    <a href="/local-clips" className="text-ink underline underline-offset-2">
+                      Open local timestamp clipping →
+                    </a>
+                  </p>
+                )}
 
                 <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-8 text-muted text-xs sm:text-sm">
                   <span className="flex items-center gap-2"><Youtube size={16} /> YouTube</span>

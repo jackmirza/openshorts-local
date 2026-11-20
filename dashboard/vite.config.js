@@ -1,6 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import seo from './vite-plugin-seo'
+import seo from './vite-plugin-seo.js'
 
 // Backend target for the dev proxy. Defaults to the docker-compose service
 // name; set VITE_PROXY_TARGET=http://localhost:8000 to run the dev server on
@@ -35,6 +35,7 @@ export default defineConfig({
       'www.openshorts.app'
     ],
     proxy: {
+      '/local-clips': { target: backend, changeOrigin: true },
       '/api': { target: backend, changeOrigin: true },
       '/videos': { target: backend, changeOrigin: true },
       '/thumbnails': { target: backend, changeOrigin: true },

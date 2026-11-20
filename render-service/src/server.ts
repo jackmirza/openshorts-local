@@ -1,5 +1,5 @@
 import express from "express";
-import { v4 as uuidv4 } from "uuid";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { initBundle } from "./bundle.js";
 import { executeRender } from "./render-worker.js";
@@ -68,7 +68,7 @@ app.post("/render", (req, res) => {
   }
 
   const { jobId, clipIndex, props } = parsed.data;
-  const renderId = uuidv4();
+  const renderId = randomUUID();
 
   const job: RenderJob = {
     renderId,

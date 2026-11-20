@@ -9,6 +9,8 @@
 
 # Python virtual environment
 .venv/
+.venv-local/
+.venv-checks/
 __pycache__/
 *.pyc
 
@@ -26,6 +28,10 @@ output/
 
 # Secrets
 .env
+.env.*
+!.env.example
+local-data/
+.local-checks/
 
 # Generated metadata
 *_metadata.json

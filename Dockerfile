@@ -102,11 +102,13 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 COPY --from=denoland/deno:bin@sha256:b507583d3c68ba69f3ed2ce5969ae5b8b70f43421c781279c7aea06435263543 /deno /usr/local/bin/deno
 
 # Helper token provider, baked in as a local Node script (no separate service).
-RUN git clone --depth 1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider /opt/bgutil-provider \
+ARG INCLUDE_YOUTUBE_DOWNLOADS=1
+RUN if [ "$INCLUDE_YOUTUBE_DOWNLOADS" = "1" ]; then \
+    git clone --depth 1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider /opt/bgutil-provider \
     && cd /opt/bgutil-provider/server \
     && npm install --no-audit --no-fund \
     && npx tsc \
-    && npm cache clean --force
+    && npm cache clean --force; fi
 ENV BGUTIL_SCRIPT_PATH=/opt/bgutil-provider/server/build/generate_once.js
 
 # Copy virtual env from builder
@@ -124,7 +126,8 @@ ENV LD_LIBRARY_PATH=/opt/venv/lib/python3.11/site-packages/nvidia/cublas/lib:/op
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 
 # Latest yt-dlp (nightly — it updates frequently) plus its helper plugin.
-RUN pip install --upgrade --pre --no-cache-dir "yt-dlp[default]" bgutil-ytdlp-pot-provider
+RUN if [ "$INCLUDE_YOUTUBE_DOWNLOADS" = "1" ]; then \
+    pip install --upgrade --pre --no-cache-dir "yt-dlp[default]" bgutil-ytdlp-pot-provider; fi
 
 # Copy application code
 COPY . .
