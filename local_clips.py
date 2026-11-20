@@ -6,6 +6,8 @@ them locally. It neither downloads sources nor publishes the result.
 """
 from __future__ import annotations
 
+from contextlib import suppress
+import errno
 import json
 import math
 import os
@@ -18,18 +20,20 @@ import uuid
 from typing import Literal
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from starlette.middleware.body_limit import RequestBodyLimitMiddleware
 
 from ffmpeg_utils import QUALITY_FAST, video_encode_args
 from jsonfile import write_json_atomic
 
 _ID = re.compile(r"^[0-9a-f]{32}$")
 _render_lock = threading.Lock()
-_active_jobs: set[str] = set()
 MAX_UPLOAD_BYTES = 2 * 1024**3
 MAX_STORE_BYTES = 20 * 1024**3
+_MULTIPART_OVERHEAD = 64 * 1024
+_SOURCE_UPLOAD_PATH = "/api/local-clips/sources"
 _RECORDING_TYPES = {
     "mov": "video/mp4",
     "matroska": "video/x-matroska",
@@ -149,6 +153,26 @@ class ClipBatch(BaseModel):
     mute: bool = False
 
 
+class _RecordingBodyLimit:
+    def __init__(self, app):
+        # FastAPI normally parses the entire multipart request before upload()
+        # runs. Stop oversized bodies before they fill the system temp drive.
+        self.app = app
+        self.limited = RequestBodyLimitMiddleware(
+            app, max_body_size=MAX_UPLOAD_BYTES + _MULTIPART_OVERHEAD
+        )
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["method"] == "POST" and scope["path"] == _SOURCE_UPLOAD_PATH:
+            return await self.limited(scope, receive, send)
+        return await self.app(scope, receive, send)
+
+
+def install_clipper(app: FastAPI, data_root: str | Path):
+    app.add_middleware(_RecordingBodyLimit)
+    app.include_router(create_router(data_root))
+
+
 def filtergraph(layout: str, focus: float, width: int = 1080, hook: bool = False) -> str:
     height = width * 16 // 9
     if layout == "fit":
@@ -231,23 +255,37 @@ def render_clip(source: Path, output: Path, clip: ClipRange, batch: ClipBatch,
 def create_router(data_root: str | Path) -> APIRouter:
     root = Path(data_root).resolve()
     router = APIRouter(dependencies=[Depends(_local_origin)])
+    source_lock = threading.Lock()
+    job_lock = threading.Lock()
+    active_jobs: set[str] = set()
 
-    def source_info(source_id):
+    def source_info(source_id, current=False):
         folder = _item(root, "sources", source_id)
+        source = folder / "source.mp4"
         try:
-            return folder, json.loads((folder / "source.json").read_text(encoding="utf-8"))
+            info = json.loads((folder / "source.json").read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise HTTPException(404, "Source not found. Upload the recording first.") from exc
+        if not source.is_file():
+            raise HTTPException(404, "Recording no longer exists. Open it again.")
+        if current and "video_start" not in info:
+            info.update(probe(source))
+        info.update(id=source_id, video_url=f"/api/local-clips/sources/{source_id}/video")
+        return source, info
 
     @router.get("/local-clips", response_class=FileResponse)
     def page():
         return FileResponse(Path(__file__).with_name("local-clips.html"), media_type="text/html")
 
-    @router.post("/api/local-clips/sources")
-    def upload(file: UploadFile = File(...)):
+    def save_recording(file: UploadFile):
         if file.size is not None and file.size > MAX_UPLOAD_BYTES:
             raise HTTPException(413, "Recordings must be smaller than 2 GB.")
-        existing = sum(p.stat().st_size for p in (root / "sources").glob("*/source.mp4"))
+        existing = 0
+        for path in (root / "sources").glob("*/source.mp4"):
+            try:
+                existing += path.stat().st_size
+            except FileNotFoundError:  # A local user removed an old recording.
+                continue
         if existing + (file.size or MAX_UPLOAD_BYTES) > MAX_STORE_BYTES:
             raise HTTPException(413, "Local sources have reached the 20 GB limit. Back up and remove old sources.")
         source_id = uuid.uuid4().hex
@@ -272,49 +310,64 @@ def create_router(data_root: str | Path) -> APIRouter:
             write_json_atomic(str(folder / "source.json"), info)
             return {**info, "video_url": f"/api/local-clips/sources/{source_id}/video"}
         except Exception:
-            shutil.rmtree(folder)
+            shutil.rmtree(folder, ignore_errors=True)
             raise
+
+    @router.post(_SOURCE_UPLOAD_PATH)
+    def upload(file: UploadFile = File(...)):
+        # Check and use the same disk allowance when multiple tabs upload.
+        with source_lock:
+            try:
+                return save_recording(file)
+            except OSError as exc:
+                if exc.errno == errno.ENOSPC:
+                    raise HTTPException(507, "The recording drive is full. Free some space and try again.") from exc
+                raise
 
     @router.get("/api/local-clips/sources/{source_id}/video")
     def source_video(source_id: str):
-        folder, info = source_info(source_id)
-        source = folder / "source.mp4"
-        if not source.is_file():
-            raise HTTPException(404, "Recording no longer exists. Open it again.")
+        source, info = source_info(source_id)
         return FileResponse(source, media_type=info.get("media_type", "video/mp4"))
+
+    def save_job_state(path, state):
+        # Windows can reject os.replace while another thread reads the target.
+        with job_lock:
+            write_json_atomic(str(path), state)
 
     def run_batch(job_id: str, batch: ClipBatch):
         folder = _item(root, "jobs", job_id)
         status_path = folder / "status.json"
         state = {"id": job_id, "status": "queued", "clips": []}
-        _active_jobs.add(job_id)
         try:
             with _render_lock:
                 state["status"] = "rendering"
-                write_json_atomic(str(status_path), state)
-                source_folder, _ = source_info(batch.source_id)
+                save_job_state(status_path, state)
+                source, _ = source_info(batch.source_id)
                 for index, clip in enumerate(batch.clips, 1):
                     name = f"clip_{index:02d}.mp4"
-                    encoder = render_clip(source_folder / "source.mp4", folder / name, clip, batch)
+                    scratch = folder / f".{name}"
+                    try:
+                        encoder = render_clip(source, scratch, clip, batch)
+                        scratch.replace(folder / name)
+                    finally:
+                        for artifact in (scratch, scratch.with_suffix(".png")):
+                            with suppress(OSError):
+                                artifact.unlink(missing_ok=True)
                     state["clips"].append({"name": name, "hook": clip.hook, "encoder": encoder,
                                            "duration": clip.duration,
                                            "url": f"/api/local-clips/jobs/{job_id}/files/{name}"})
-                    write_json_atomic(str(status_path), state)
+                    save_job_state(status_path, state)
                 state["status"] = "completed"
         except Exception as exc:
             state.update(status="failed", error=str(exc)[-1200:])
         finally:
-            write_json_atomic(str(status_path), state)
-            _active_jobs.discard(job_id)
+            with job_lock:
+                active_jobs.discard(job_id)
+                write_json_atomic(str(status_path), state)
 
     @router.post("/api/local-clips/jobs", status_code=202)
     def submit(batch: ClipBatch, background: BackgroundTasks):
-        folder, info = source_info(batch.source_id)
-        source = folder / "source.mp4"
-        if not source.is_file():
-            raise HTTPException(404, "Recording no longer exists. Open it again.")
-        if "video_start" not in info:  # Earlier uploads stored the container duration.
-            info = probe(source)
+        _, info = source_info(batch.source_id, current=True)
         if any(c.start < info["video_start"] - .05 for c in batch.clips):
             raise HTTPException(400, "A clip starts before the source video track.")
         if any(c.end > info["duration"] + .01 for c in batch.clips):
@@ -323,20 +376,37 @@ def create_router(data_root: str | Path) -> APIRouter:
         folder = _item(root, "jobs", job_id)
         folder.mkdir(parents=True)
         write_json_atomic(str(folder / "recipe.json"), batch.model_dump())
-        write_json_atomic(str(folder / "status.json"), {"id": job_id, "status": "queued", "clips": []})
-        _active_jobs.add(job_id)
+        with job_lock:
+            write_json_atomic(str(folder / "status.json"), {"id": job_id, "status": "queued", "clips": []})
+            active_jobs.add(job_id)
         background.add_task(run_batch, job_id, batch)
         return {"id": job_id, "status": "queued"}
 
     @router.get("/api/local-clips/jobs/{job_id}")
-    def status(job_id: str):
-        path = _item(root, "jobs", job_id) / "status.json"
-        try:
-            state = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise HTTPException(404, "Job not found") from exc
-        if state["status"] in ("queued", "rendering") and job_id not in _active_jobs:
-            state.update(status="interrupted", error="The server restarted. Submit the clip ranges again.")
+    def status(job_id: str, restore: bool = False):
+        folder = _item(root, "jobs", job_id)
+        with job_lock:
+            try:
+                state = json.loads((folder / "status.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise HTTPException(404, "Job not found") from exc
+            if state["status"] in ("queued", "rendering") and job_id not in active_jobs:
+                state.update(status="interrupted", error="Export interrupted. Use Create clips to run these ranges again.")
+        if state["status"] == "interrupted":
+            for artifact in folder.glob(".clip_*"):
+                if re.fullmatch(r"\.clip_\d{2}\.(mp4|png)", artifact.name):
+                    with suppress(OSError):
+                        artifact.unlink(missing_ok=True)
+        if restore:
+            try:
+                batch = ClipBatch.model_validate_json((folder / "recipe.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return state
+            state["recipe"] = batch.model_dump()
+            try:
+                _, state["source"] = source_info(batch.source_id, current=True)
+            except HTTPException:
+                state["source"] = None  # Existing exports can outlive the original recording.
         return state
 
     @router.get("/api/local-clips/jobs/{job_id}/files/{name}")

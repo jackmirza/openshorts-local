@@ -4457,8 +4457,8 @@ app.include_router(_free_tools.router)
 LOCAL_CLIPPER_ENABLED = (not BILLING_ENABLED and
                          os.environ.get("ENABLE_LOCAL_CLIPPER") == "1")
 if LOCAL_CLIPPER_ENABLED:
-    from local_clips import create_router as _local_clip_router
-    app.include_router(_local_clip_router(os.environ.get("LOCAL_CLIP_DIR", "local-data")))
+    from local_clips import install_clipper as _install_local_clipper
+    _install_local_clipper(app, os.environ.get("LOCAL_CLIP_DIR", "local-data"))
 
 # Enable CORS for frontend. Cloud mode locks this down to the configured origins;
 # self-host keeps the permissive wildcard it has always used.

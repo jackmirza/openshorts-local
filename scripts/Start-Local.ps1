@@ -1,6 +1,10 @@
 [CmdletBinding()]
 param([switch]$Build, [switch]$InstallModel)
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'clipping-process.ps1')
+if (Get-ClippingListeners) {
+    throw 'Stop the Windows clipper before starting the Docker stack. They share the local recording store.'
+}
 $clipRepo = Split-Path -Parent $PSScriptRoot
 Push-Location -LiteralPath $clipRepo
 try {
@@ -20,12 +24,12 @@ try {
     $clipReady = $false
     for ($clipAttempt = 0; $clipAttempt -lt 30; $clipAttempt++) {
         try {
-            $clipResponse = Invoke-WebRequest -Uri 'http://127.0.0.1:8000/health/ready' -TimeoutSec 3
-            if ($clipResponse.StatusCode -eq 200) { $clipReady = $true; break }
+            $clipResponse = Invoke-RestMethod -Uri 'http://127.0.0.1:5175/api/config' -TimeoutSec 3
+            if ($clipResponse.localClipper -and -not $clipResponse.timestampOnly) { $clipReady = $true; break }
         } catch { }
         Start-Sleep -Seconds 2
     }
-    if (-not $clipReady) { throw 'The backend is still starting. Check docker compose -f compose.local.yml logs backend.' }
+    if (-not $clipReady) { throw 'The dashboard is not ready. Check docker compose -f compose.local.yml logs frontend backend.' }
     Write-Host 'Gameplay clipper: http://localhost:5175/local-clips'
     Write-Host 'OpenShorts dashboard: http://localhost:5175'
 } finally {

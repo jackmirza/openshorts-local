@@ -9,7 +9,7 @@ import sys
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 
-from local_clips import create_router
+from local_clips import install_clipper
 
 # The upstream encoder announces NVENC with Unicode. Redirected Windows
 # consoles default to a legacy code page; logging must not fail a video job.
@@ -18,7 +18,7 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 app = FastAPI(title="OpenShorts Local Gameplay", docs_url=None, redoc_url=None)
-app.include_router(create_router(os.environ.get("LOCAL_CLIP_DIR", "local-data")))
+install_clipper(app, os.environ.get("LOCAL_CLIP_DIR", "local-data"))
 
 
 @app.get("/")

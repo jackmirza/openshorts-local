@@ -1,4 +1,5 @@
 """Local gameplay clips: no key needed, bounded ranges, no remote sources."""
+import asyncio
 import io
 import json
 import os
@@ -18,7 +19,7 @@ import local_clips as lc
 @pytest.fixture
 def workspace(tmp_path, monkeypatch):
     app = FastAPI()
-    app.include_router(lc.create_router(tmp_path))
+    lc.install_clipper(app, tmp_path)
     info = {"duration": 60.0, "video_start": 0.0, "width": 1920, "height": 1080,
             "audio": False, "media_type": "video/mp4"}
     monkeypatch.setattr(lc, "probe", lambda path: dict(info))
@@ -65,6 +66,39 @@ def test_external_browser_origin_cannot_submit_a_recording(workspace):
                          headers={'Origin': 'https://unrelated.example'})
     assert result.status_code == 403
     assert not (root / 'sources').exists()
+
+
+@pytest.mark.parametrize('declare_length', [False, True])
+def test_upload_body_is_capped_before_a_recording_is_saved(tmp_path, monkeypatch, declare_length):
+    monkeypatch.setattr(lc, 'MAX_UPLOAD_BYTES', 16)
+    monkeypatch.setattr(lc, '_MULTIPART_OVERHEAD', 192)
+    app = FastAPI()
+    lc.install_clipper(app, tmp_path)
+    read_count = 0
+    body = (b'--clip\r\nContent-Disposition: form-data; name="file"; filename="a.mp4"\r\n'
+            b'Content-Type: video/mp4\r\n\r\n' + b'x' * 256 + b'\r\n--clip--\r\n')
+
+    async def receive():
+        nonlocal read_count
+        read_count += 1
+        assert read_count == 1
+        return {'type': 'http.request', 'body': body, 'more_body': False}
+
+    headers = [(b'content-type', b'multipart/form-data; boundary=clip')]
+    if declare_length:
+        headers.append((b'content-length', str(len(body)).encode()))
+    response = []
+
+    async def send(message):
+        response.append(message)
+
+    path = '/api/local-clips/sources'
+    scope = {'type': 'http', 'asgi': {'version': '3.0'}, 'http_version': '1.1', 'scheme': 'http',
+             'method': 'POST', 'path': path, 'root_path': '', 'query_string': b'', 'headers': headers}
+    asyncio.run(app(scope, receive, send))
+    assert response[0]['status'] == 413
+    assert read_count == (0 if declare_length else 1)
+    assert not (tmp_path / 'sources').exists()
 
 
 @pytest.mark.parametrize('start,end', [(10, 5), (0, 181), (-1, 5), (0, float('nan')),
@@ -163,9 +197,35 @@ def test_batch_calls_local_renderer_and_exposes_only_finished_files(workspace, m
     assert (root / 'jobs' / job_id / 'recipe.json').exists()
 
 
+def test_saved_export_restores_source_and_ranges_after_restart(workspace, monkeypatch):
+    client, root = workspace
+    source = upload(client)
+
+    def render(_source, output, _clip, _batch):
+        output.write_bytes(b'completed clip')
+        return 'libx264'
+
+    monkeypatch.setattr(lc, 'render_clip', render)
+    recipe = {'source_id': source['id'], 'layout': 'crop', 'focus': 24, 'mute': True,
+              'clips': [{'start': 1.01, 'end': 4.01, 'hook': 'Saved hook'}]}
+    job = client.post('/api/local-clips/jobs', json=recipe).json()
+    app = FastAPI()
+    lc.install_clipper(app, root)
+    restarted = TestClient(app)
+    url = f'/api/local-clips/jobs/{job["id"]}?restore=true'
+    restored = restarted.get(url).json()
+    assert restored['recipe'] == recipe
+    assert restored['source']['video_url'] == source['video_url']
+    assert restored['status'] == 'completed'
+    (root / 'sources' / source['id'] / 'source.mp4').unlink()
+    restored = restarted.get(url).json()
+    assert restored['source'] is None
+    assert restarted.get(restored['clips'][0]['url']).content == b'completed clip'
+
+
 @pytest.mark.parametrize('finished', [0, 1])
 def test_renderer_failure_keeps_only_the_finished_clips(workspace, monkeypatch, finished):
-    client, _ = workspace
+    client, root = workspace
     source = upload(client)
 
     def fail(_source, out, clip, _batch):
@@ -173,6 +233,7 @@ def test_renderer_failure_keeps_only_the_finished_clips(workspace, monkeypatch, 
             out.write_bytes(b'completed clip')
             return 'libx264'
         out.write_bytes(b'incomplete clip')
+        out.with_suffix('.png').write_bytes(b'temporary overlay')
         raise RuntimeError('Encoder unavailable')
     monkeypatch.setattr(lc, 'render_clip', fail)
     job = client.post('/api/local-clips/jobs', json={
@@ -181,6 +242,9 @@ def test_renderer_failure_keeps_only_the_finished_clips(workspace, monkeypatch, 
     assert status['status'] == 'failed' and len(status['clips']) == finished
     if finished:
         assert client.get(status['clips'][0]['url']).content == b'completed clip'
+    folder = root / 'jobs' / job['id']
+    assert len(list(folder.glob('*.mp4'))) == finished
+    assert list(folder.glob('*.png')) == []
     assert client.get(f'/api/local-clips/jobs/{job["id"]}/files/clip_{finished + 1:02d}.mp4').status_code == 404
 
 
@@ -189,8 +253,15 @@ def test_restarted_jobs_are_not_left_processing_forever(workspace):
     job_id = 'a' * 32
     folder = root / 'jobs' / job_id
     folder.mkdir(parents=True)
-    (folder / 'status.json').write_text(json.dumps({'id': job_id, 'status': 'rendering', 'clips': []}))
+    (folder / 'clip_01.mp4').write_bytes(b'finished')
+    (folder / '.clip_02.mp4').write_bytes(b'unfinished')
+    (folder / '.clip_02.png').write_bytes(b'overlay')
+    (folder / 'status.json').write_text(json.dumps({'id': job_id, 'status': 'rendering',
+                                                    'clips': [{'name': 'clip_01.mp4'}]}))
     assert client.get(f'/api/local-clips/jobs/{job_id}').json()['status'] == 'interrupted'
+    assert list(folder.glob('*.mp4')) == [folder / 'clip_01.mp4']
+    assert list(folder.glob('*.png')) == []
+    assert client.get(f'/api/local-clips/jobs/{job_id}/files/clip_01.mp4').content == b'finished'
 
 
 def test_hook_text_is_an_image_and_never_part_of_the_filtergraph(tmp_path, monkeypatch):

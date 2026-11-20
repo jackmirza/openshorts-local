@@ -32,12 +32,13 @@ let sourceId = null, sourceStart = 0, sourceDuration = 0;
 let uploading = false, rendering = false, focusedRange = null;
 const $ = id => document.getElementById(id);
 function message(text, error = false) { $('progress').hidden = false; $('status').textContent = text; $('status').classList.toggle('error', error); }
-function addRange() {
+function addRange(range = {}) {
   if ($('ranges').children.length >= 15) return;
   const item = document.createElement('div'); item.className = 'clip';
   item.innerHTML = '<div class="row"><div><label>Start<input class="start" aria-label="Clip start" inputmode="decimal" required></label></div><div><label>End<input class="end" aria-label="Clip end" inputmode="decimal" required></label></div><button class="secondary remove" type="button" aria-label="Remove clip">×</button></div><label>Hook text (optional)<input class="hook" maxlength="100" placeholder="A hook that fits this moment"></label>';
-  item.querySelector('.start').value = sourceStart.toFixed(2);
-  item.querySelector('.end').value = Math.min(sourceStart + 20, sourceDuration || 20).toFixed(2);
+  item.querySelector('.start').value = range.start ?? sourceStart.toFixed(2);
+  item.querySelector('.end').value = range.end ?? Math.min(sourceStart + 20, sourceDuration || 20).toFixed(2);
+  item.querySelector('.hook').value = range.hook ?? '';
   item.addEventListener('focusin', () => { focusedRange = item; });
   item.querySelector('.remove').onclick = () => { if ($('ranges').children.length > 1) { item.remove(); focusedRange = $('ranges').lastElementChild; } };
   $('ranges').append(item); focusedRange = item;
@@ -50,11 +51,12 @@ function seconds(text) {
   return value;
 }
 async function api(url, options) {
-  const res = await fetch(url, options);
+  const res = await fetch(url, {cache: 'no-store', ...options});
   const body = await res.json().catch(() => null);
   if (!res.ok || !body) {
     const detail = body?.detail;
     const reason = typeof detail === 'string' ? detail : detail?.[0]?.msg;
+    if (!reason && res.status === 413) throw new Error('The recording exceeds the upload size limit.');
     throw new Error(reason || 'The clipper could not complete the request. Try again.');
   }
   return body;
@@ -73,34 +75,48 @@ $('source').onloadedmetadata = () => {
   $('previewNote').textContent = '';
 };
 $('source').onerror = previewUnavailable;
+function showRecording(result, ranges = []) {
+  sourceId = result.id;
+  sourceStart = result.video_start ?? 0;
+  sourceDuration = result.duration;
+  $('sourceActions').hidden = true;
+  $('source').hidden = false;
+  $('previewNote').textContent = 'Loading preview…';
+  $('source').src = result.video_url;
+  $('sourceInfo').textContent = `${result.name} · ${result.width} × ${result.height} · ${result.duration.toFixed(1)} seconds`;
+  $('ranges').replaceChildren();
+  if (ranges.length) ranges.forEach(addRange);
+  else addRange();
+}
+function updateButtons() {
+  $('render').disabled = !sourceId || uploading || rendering;
+  $('uploadButton').disabled = uploading || rendering;
+}
+function rememberJob(id) {
+  const url = new URL(window.location.href);
+  if (id) url.searchParams.set('job', id);
+  else url.searchParams.delete('job');
+  window.history.replaceState(null, '', url);
+}
 $('uploadForm').onsubmit = async event => {
   event.preventDefault();
   if (uploading || rendering) return;
   const file = $('file').files[0]; if (!file) return;
   if (file.size > 2 * 1024 ** 3) { message('Choose a recording smaller than 2 GB.', true); return; }
   uploading = true;
-  $('render').disabled = true;
-  $('uploadButton').disabled = true;
+  updateButtons();
   message('Opening recording…');
   try {
     const data = new FormData(); data.append('file', file);
     const result = await api('/api/local-clips/sources', { method: 'POST', body: data });
-    sourceId = result.id;
-    sourceStart = result.video_start ?? 0;
-    sourceDuration = result.duration;
-    $('sourceActions').hidden = true;
-    $('source').hidden = false;
-    $('previewNote').textContent = 'Loading preview…';
-    $('source').src = result.video_url;
-    $('sourceInfo').textContent = `${result.name} · ${result.width} × ${result.height} · ${result.duration.toFixed(1)} seconds`;
-    $('ranges').replaceChildren(); addRange();
+    showRecording(result);
+    rememberJob(null);
     $('results').replaceChildren();
     message('Recording ready. Choose the setup and payoff for each clip.');
   } catch (error) { message(error.message, true); }
   finally {
     uploading = false;
-    $('render').disabled = !sourceId;
-    $('uploadButton').disabled = false;
+    updateButtons();
   }
 };
 $('add').onclick = () => addRange();
@@ -113,6 +129,25 @@ function showClip(clip) {
   title.textContent = clip.hook || clip.name; link.href = clip.url; link.download = clip.name; link.className = 'button'; link.textContent = 'Download MP4';
   card.append(video, title, link); $('results').append(card);
 }
+async function followJob(id, total, state = null) {
+  let displayed = 0;
+  while (true) {
+    state ??= await api(`/api/local-clips/jobs/${id}`);
+    for (const clip of state.clips.slice(displayed)) showClip(clip);
+    displayed = state.clips.length;
+    if (['failed', 'interrupted'].includes(state.status)) {
+      message(state.error || 'Rendering stopped. Try again.', true);
+      return;
+    }
+    const count = total ? `${displayed}/${total}` : displayed;
+    const phase = {queued: 'Queued', rendering: 'Rendering', completed: 'Ready'}[state.status];
+    if (!phase) throw new Error('The export status is unavailable. Reload to check again.');
+    message(`${phase} · ${count} clips`);
+    if (state.status === 'completed') return;
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    state = null;
+  }
+}
 $('render').onclick = async () => {
   if (!sourceId || uploading || rendering) return;
   try {
@@ -123,23 +158,39 @@ $('render').onclick = async () => {
       if (clip.start < sourceStart - 0.05) throw new Error('A clip starts before the source video track.');
       if (clip.end > sourceDuration + 0.01) throw new Error('A clip ends after the source video track.');
     }
-    rendering = true; $('render').disabled = true; $('uploadButton').disabled = true; $('results').replaceChildren();
+    rendering = true;
+    updateButtons();
     const body = {source_id: sourceId, clips, layout: $('layout').value, focus: Number($('focus').value), mute: $('mute').checked};
     const job = await api('/api/local-clips/jobs', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
-    message('Clips queued. You can keep this page open while they render.');
-    let displayed = 0;
-    while (true) {
-      const state = await api(`/api/local-clips/jobs/${job.id}`);
-      for (const clip of state.clips.slice(displayed)) showClip(clip);
-      displayed = state.clips.length;
-      message(`${state.status === 'completed' ? 'Ready' : state.status} · ${state.clips.length}/${clips.length} clips`);
-      if (['failed', 'interrupted'].includes(state.status)) throw new Error(state.error || 'Rendering stopped. Try again.');
-      if (state.status === 'completed') break;
-      await new Promise(resolve => setTimeout(resolve, 1500));
-    }
+    rememberJob(job.id);
+    $('results').replaceChildren();
+    await followJob(job.id, clips.length, {...job, clips: []});
   } catch (error) { message(error.message, true); }
-  finally { rendering = false; $('render').disabled = !sourceId; $('uploadButton').disabled = false; }
+  finally { rendering = false; updateButtons(); }
 };
+async function restoreJob() {
+  const id = new URLSearchParams(window.location.search).get('job');
+  if (!id || !/^[0-9a-f]{32}$/.test(id)) return;
+  rendering = true;
+  updateButtons();
+  message('Restoring export…');
+  try {
+    const state = await api(`/api/local-clips/jobs/${id}?restore=true`);
+    const {recipe, source} = state;
+    if (source) {
+      showRecording(source, recipe.clips);
+      $('layout').value = recipe.layout;
+      $('layout').onchange();
+      $('focus').value = recipe.focus;
+      $('mute').checked = recipe.mute;
+    } else if (recipe) {
+      $('sourceInfo').textContent = 'The original recording is unavailable. Finished clips are still listed below.';
+    }
+    await followJob(id, recipe?.clips.length, state);
+  } catch (error) { message(error.message, true); }
+  finally { rendering = false; updateButtons(); }
+}
 addRange();
+restoreJob();
 fetch('/api/config').then(r => r.json()).then(c => { $('aiPickerLink').hidden = Boolean(c.timestampOnly); }).catch(() => {});
 </script></body></html>

@@ -54,8 +54,10 @@ Recordings and finished jobs are kept in `local-data/`; settings and logs are
 in `.local-checks/`. These folders, virtual environments and credentials are
 excluded from Git and Docker build contexts. Download or back up clips you want
 to keep. Sources are capped at 20 GB; this workspace does not automatically
-erase your footage. Reopening the page starts a fresh editing session; saved
-files remain on disk.
+erase your footage. After you click **Create clips**, the page URL identifies
+that export. Reload or bookmark it to recover the downloads and clip ranges.
+If the worker stopped during an export, reopen the same link to see any
+finished clips and run the saved ranges again.
 
 ## Original AI picker (optional)
 
