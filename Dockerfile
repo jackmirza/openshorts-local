@@ -1,7 +1,19 @@
 # Base images are pinned by digest (@sha256): the tag is only a label.
 # To update one: docker buildx imagetools inspect <tag> and paste the new digest.
+ARG GPU=0
+ARG INCLUDE_OSRENDER=${GPU}
+ARG INCLUDE_YOUTUBE_DOWNLOADS=1
+ARG PARALLEL_WHEEL_DOWNLOADS=0
+
 # Multi-stage build for smaller final image
-FROM python:3.11-slim@sha256:65bd3d9f1d7fa268dd1909973ba7eb4bdf41f6dcf2cfbe76ba9528b170f3fd79 AS builder
+FROM python:3.11-slim@sha256:65bd3d9f1d7fa268dd1909973ba7eb4bdf41f6dcf2cfbe76ba9528b170f3fd79 AS base
+
+# Select the empty stage for an unused tool so BuildKit never fetches its
+# base image. Each optional stage exports files under the same directory.
+FROM base AS empty-tools
+RUN mkdir -p /opt/optional-tools
+
+FROM base AS builder
 
 WORKDIR /app
 
@@ -18,7 +30,7 @@ RUN pip install --no-cache-dir pip==26.3
 # torch from PyPI bundles ~16 CUDA/triton wheels (several GB) even when nothing
 # will ever use a GPU. CPU builds take the same versions from PyTorch's CPU
 # index first (keep the two pins in step with requirements.txt).
-ARG GPU=0
+ARG GPU
 RUN if [ "$GPU" != "1" ]; then \
       pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
         torch==2.11.0 torchvision==0.26.0; \
@@ -40,7 +52,16 @@ RUN if [ "$GPU" != "1" ]; then \
 # on the CPU. So the GPU build writes onnxruntime-gpu again on top (same
 # version, from the lock) and fails unless the CUDA provider is compiled in.
 # get_available_providers() lists what the build has, no GPU needed at build time.
-RUN if [ "$GPU" = "1" ]; then LOCK=requirements-gpu.lock; else LOCK=requirements-cpu.lock; fi \
+ARG PARALLEL_WHEEL_DOWNLOADS
+RUN --mount=type=cache,id=openshorts-pip-wheels,target=/opt/wheels,sharing=locked \
+    if [ "$GPU" = "1" ]; then LOCK=requirements-gpu.lock; else LOCK=requirements-cpu.lock; fi \
+ && if [ "$PARALLEL_WHEEL_DOWNLOADS" = "1" ]; then \
+      grep -Ev '^[[:space:]]*(#.*)?$' "$LOCK" \
+        | xargs -r -P 12 -I PIN sh -c '\
+          pip wheel --no-cache-dir --no-deps --no-index --find-links=/opt/wheels --wheel-dir=/opt/wheels "$1" >/dev/null 2>&1 \
+          || pip wheel --no-cache-dir --no-deps --timeout 60 --retries 8 --resume-retries 20 --wheel-dir=/opt/wheels "$1"' sh PIN \
+      && export PIP_NO_INDEX=1 PIP_FIND_LINKS=/opt/wheels; \
+    fi \
  && pip install --no-cache-dir --no-deps -r "$LOCK" \
  && if [ "$GPU" = "1" ]; then \
       pip install --no-cache-dir --no-deps --force-reinstall \
@@ -50,28 +71,31 @@ RUN if [ "$GPU" = "1" ]; then LOCK=requirements-gpu.lock; else LOCK=requirements
  && pip check \
  && pip install --no-index --no-deps -q -r requirements.txt -r requirements-billing.txt
 
-# osrender (osrender/, Rust): renders a reframed clip in one pass on the GPU
-# (gpu_render.py). Only GPU builds compile it; the CPU image ships without it
-# and renders through ffmpeg. It links the same Debian FFmpeg libraries the
-# final stage installs, so both stages must stay on the same Debian release.
-FROM rust:1-slim-trixie@sha256:7eab7ce19273ce785e0ca7578bdf7bc1fcbae621775a8197379a04c9f6e03cd5 AS osrender
-ARG GPU=0
+FROM empty-tools AS downloader-0
+FROM empty-tools AS downloader-1
+COPY --from=denoland/deno:bin@sha256:b507583d3c68ba69f3ed2ce5969ae5b8b70f43421c781279c7aea06435263543 /deno /opt/optional-tools/deno
+FROM downloader-${INCLUDE_YOUTUBE_DOWNLOADS} AS downloader
+
+# osrender links the same Debian FFmpeg libraries the final stage installs.
+# Without it, gpu_render uses the existing FFmpeg path, including NVENC.
+FROM empty-tools AS osrender-0
+FROM rust:1-slim-trixie@sha256:7eab7ce19273ce785e0ca7578bdf7bc1fcbae621775a8197379a04c9f6e03cd5 AS osrender-1
 COPY osrender /src/osrender
-RUN mkdir -p /out && if [ "$GPU" = "1" ]; then \
-      apt-get update && apt-get install -y --no-install-recommends \
+RUN mkdir -p /opt/optional-tools \
+    && apt-get update && apt-get install -y --no-install-recommends \
         pkg-config clang libclang-dev libavcodec-dev libavformat-dev libavutil-dev \
         libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev \
-      && rm -rf /var/lib/apt/lists/* \
-      && cd /src/osrender && cargo build --release --locked \
-      && cp target/release/osrender /out/; \
-    fi
+    && rm -rf /var/lib/apt/lists/* \
+    && cd /src/osrender && cargo build --release --locked \
+    && cp target/release/osrender /opt/optional-tools/
+FROM osrender-${INCLUDE_OSRENDER} AS osrender
 
 # Final stage
-FROM python:3.11-slim@sha256:65bd3d9f1d7fa268dd1909973ba7eb4bdf41f6dcf2cfbe76ba9528b170f3fd79
+FROM base
 
 WORKDIR /app
 
-# Install FFmpeg, OpenCV deps, Node.js + npm + git (for yt-dlp JS + bgutil build).
+# Install FFmpeg, OpenCV dependencies and fonts.
 # fontconfig + fonts-liberation back the subtitle font choices: without real
 # fonts libass falls back to DejaVu for every UI option (issue #57).
 # fonts-noto-core (~42 MB) is the glyph fallback for every other script:
@@ -93,16 +117,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js 22 from NodeSource: Debian's nodejs package is Node 20, which no
-# longer gets security fixes. The bgutil token provider below runs on it.
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+# longer gets security fixes. Only the YouTube token provider uses it.
+ARG INCLUDE_YOUTUBE_DOWNLOADS
+RUN if [ "$INCLUDE_YOUTUBE_DOWNLOADS" = "1" ]; then \
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*; fi
 
 # Deno JS runtime — required by yt-dlp for some extractor challenges.
-COPY --from=denoland/deno:bin@sha256:b507583d3c68ba69f3ed2ce5969ae5b8b70f43421c781279c7aea06435263543 /deno /usr/local/bin/deno
+COPY --from=downloader /opt/optional-tools/ /usr/local/bin/
 
 # Helper token provider, baked in as a local Node script (no separate service).
-ARG INCLUDE_YOUTUBE_DOWNLOADS=1
 RUN if [ "$INCLUDE_YOUTUBE_DOWNLOADS" = "1" ]; then \
     git clone --depth 1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider /opt/bgutil-provider \
     && cd /opt/bgutil-provider/server \
@@ -113,8 +138,8 @@ ENV BGUTIL_SCRIPT_PATH=/opt/bgutil-provider/server/build/generate_once.js
 
 # Copy virtual env from builder
 COPY --from=builder /opt/venv /opt/venv
-# Empty on CPU builds.
-COPY --from=osrender /out/ /usr/local/bin/
+# Empty when FFmpeg does the reframing.
+COPY --from=osrender /opt/optional-tools/ /usr/local/bin/
 ENV PATH="/opt/venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1
 

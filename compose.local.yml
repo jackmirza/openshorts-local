@@ -8,7 +8,9 @@ services:
       context: .
       args:
         GPU: "1"
+        INCLUDE_OSRENDER: "0"
         INCLUDE_YOUTUBE_DOWNLOADS: "0"
+        PARALLEL_WHEEL_DOWNLOADS: "1"
     environment:
       BILLING_ENABLED: "0"
       ENABLE_LOCAL_CLIPPER: "1"

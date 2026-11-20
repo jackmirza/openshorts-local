@@ -79,6 +79,12 @@ uses local Whisper and Ollama, releases the LLM after each request, and does
 not supply cloud-service credentials. Exact capacity still depends on the
 recording and available RAM/VRAM.
 
+The file-only profile uses FFmpeg for reframing and can still use NVIDIA
+encoding. Its build skips the optional Rust renderer and the YouTube
+JavaScript runtimes. It downloads the locked Python packages in parallel,
+resumes incomplete transfers where supported, and caches completed wheels
+across builds.
+
 The transcript picker works from spoken content. Mostly silent gameplay
 instead uses the upstream Gemini vision path, which needs a key and has quota
 limits; a text-only Ollama model cannot replace it. Use the timestamp workspace
