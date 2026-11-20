@@ -2449,7 +2449,8 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
         print(f"🚫 {e}")
         raise
     except Exception as e:
-        print(f"❌ Gemini Error: {e}")
+        provider = "Local model" if llm_backend.active() else "Gemini"
+        print(f"❌ {provider} error: {e}")
         return None
 
 
@@ -2596,16 +2597,21 @@ def get_visual_clips(video_path, video_duration, language="en", viewer_clips=Non
     stretch (``vision_segments``), and the picks are merged, de-overlapped
     and cut to the best ``CLIP_TARGET_MAX`` by score: a silent multi-hour
     console capture used to fail at the model."""
-    print("🎥  Silent video — analyzing with Gemini vision (no transcript)...")
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         if llm_backend.active():
+            if os.environ.get("ENABLE_LOCAL_CLIPPER") == "1":
+                raise RuntimeError(
+                    "The local AI picker needs spoken commentary. For gameplay with little or no "
+                    "speech, choose timestamps in the local clipper at /local-clips."
+                )
             print("❌ This video has no usable speech, so it has to be clipped by "
                   "watching it, and that needs Gemini (a text-only LLM server "
                   "cannot see the footage). Add a GEMINI_API_KEY for silent videos.")
         else:
             print("❌ Error: GEMINI_API_KEY not found.")
         return None
+    print("🎥  Silent video — analyzing with Gemini vision (no transcript)...")
     client = genai.Client(api_key=api_key)
     model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
 

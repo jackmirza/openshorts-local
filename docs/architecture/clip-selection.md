@@ -54,8 +54,9 @@ goes through the same proxy, never as the raw file (a broken capture, such as an
 HLS VOD whose audio will not decode, made Gemini answer 400 INVALID_ARGUMENT).
 When the proxy's audio cannot be encoded it is retried without audio. Do not
 port the frame trick here. Gemini-only: a
-text-only `LLM_BASE_URL` server cannot see footage, and without `GEMINI_API_KEY`
-the function logs one line and returns None, which fails the job.
+text-only `LLM_BASE_URL` server cannot see footage. Without `GEMINI_API_KEY`,
+the local clipper profile tells the user how to switch to timestamp clipping.
+The other deployments report the missing key and fail the job.
 
 The public `/gta-5-clips`, `/gta-6-clips`, `/wow-forever-clips` and `/platforms/twitch` pages state
 these thresholds and the stretch sizes; if the behaviour changes, change

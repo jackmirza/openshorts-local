@@ -72,7 +72,9 @@ because both frontends use port 5175.
 ```
 
 This is an additional, multi-gigabyte installation. It is not required for the
-working timestamp clipper. The profile limits jobs and clip workers to one,
+working timestamp clipper. The launcher checks the configured Ollama model
+before building the backend. Use `-InstallModel` for the first install or
+when switching models. The profile limits jobs and clip workers to one,
 uses local Whisper and Ollama, releases the LLM after each request, and does
 not supply cloud-service credentials. Exact capacity still depends on the
 recording and available RAM/VRAM.

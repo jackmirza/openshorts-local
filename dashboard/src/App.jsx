@@ -2295,9 +2295,9 @@ function App() {
 
                 {localClipper && (
                   <p className="text-sm text-muted">
-                    Gameplay without speech?{' '}
+                    {localLlm ? 'Local AI uses spoken commentary. For gameplay with little or no speech, ' : 'Gameplay without speech? '}
                     <a href="/local-clips" className="text-ink underline underline-offset-2">
-                      Open local timestamp clipping →
+                      {localLlm ? 'choose clip times manually' : 'open local timestamp clipping'} →
                     </a>
                   </p>
                 )}
