@@ -1,0 +1,32 @@
+{
+  "date": "2026-11-20",
+  "upstream_base": "408f164a5909731176886a08b5a848f522feba41",
+  "local_workspace": "native Windows timestamp clipping",
+  "windows_workspace_tests": {"passed": 18, "failed": 0},
+  "linux_backend_tests": {"passed": 2379, "skipped": 90, "failed": 0},
+  "linux_skip_reason": "Optional model and external-service tests are not available in the minimal local test environment.",
+  "dashboard_build": "passed",
+  "dashboard_lint": "passed",
+  "composition_typescript_build": "passed",
+  "renderer_typescript_build": "passed",
+  "renderer_composition_tests": {"passed": 2, "failed": 0},
+  "javascript_dependency_audit": {
+    "dashboard_reported_vulnerabilities": 0,
+    "compositions_reported_vulnerabilities": 0,
+    "renderer_reported_vulnerabilities": 0,
+    "scope": "Point-in-time npm audit reports, not a complete security assessment."
+  },
+  "video_export_checks": {
+    "source": "Generated moving test pattern; no game footage downloaded",
+    "layouts": ["fit", "crop"],
+    "dimensions": [1080, 1920],
+    "fps": 30,
+    "duration_seconds_each": 5,
+    "encoder": "h264_nvenc",
+    "audio_retention_and_mute": "passed",
+    "complete_decode": "passed"
+  },
+  "browser_upload_render_download_link": "passed",
+  "cloud_api_calls_required_for_timestamp_mode": false,
+  "full_optional_gpu_ai_stack_end_to_end": "not validated"
+}
