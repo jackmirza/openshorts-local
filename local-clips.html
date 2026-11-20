@@ -13,6 +13,7 @@
 <section><h2>1. Open a recording</h2><p class="muted">Use your recording or a creator-provided file you are allowed to edit. Up to 2 GB.</p>
 <form id="uploadForm"><label for="file">Video file</label><input id="file" type="file" accept="video/*" required><p><button id="uploadButton">Open recording</button></p></form>
 <video id="source" controls preload="metadata" hidden></video><p id="sourceInfo" class="muted"></p>
+<p id="previewNote" class="muted" aria-live="polite"></p>
 <div id="sourceActions" class="row" hidden><button type="button" class="secondary" id="markStart">Use current time as start</button><button type="button" class="secondary" id="markEnd">Use current time as end</button></div>
 </section>
 <section><h2>2. Build your clips</h2><p class="muted">Enter seconds or mm:ss. Each clip can be 1–180 seconds. Moment selection here is manual.</p>
@@ -27,14 +28,16 @@
 <p class="muted">Local timestamp mode uses no AI API or publishing service. Finished clips stay in local-data/jobs until you remove them.</p>
 </main>
 <script>
-let sourceId = null, rendering = false, focusedRange = null;
+let sourceId = null, sourceStart = 0, sourceDuration = 0;
+let uploading = false, rendering = false, focusedRange = null;
 const $ = id => document.getElementById(id);
 function message(text, error = false) { $('progress').hidden = false; $('status').textContent = text; $('status').classList.toggle('error', error); }
-function addRange(start = '0', end = '20') {
+function addRange() {
   if ($('ranges').children.length >= 15) return;
   const item = document.createElement('div'); item.className = 'clip';
   item.innerHTML = '<div class="row"><div><label>Start<input class="start" aria-label="Clip start" inputmode="decimal" required></label></div><div><label>End<input class="end" aria-label="Clip end" inputmode="decimal" required></label></div><button class="secondary remove" type="button" aria-label="Remove clip">×</button></div><label>Hook text (optional)<input class="hook" maxlength="100" placeholder="A hook that fits this moment"></label>';
-  item.querySelector('.start').value = start; item.querySelector('.end').value = end;
+  item.querySelector('.start').value = sourceStart.toFixed(2);
+  item.querySelector('.end').value = Math.min(sourceStart + 20, sourceDuration || 20).toFixed(2);
   item.addEventListener('focusin', () => { focusedRange = item; });
   item.querySelector('.remove').onclick = () => { if ($('ranges').children.length > 1) { item.remove(); focusedRange = $('ranges').lastElementChild; } };
   $('ranges').append(item); focusedRange = item;
@@ -42,56 +45,96 @@ function addRange(start = '0', end = '20') {
 function seconds(text) {
   const raw = text.trim();
   if (!/^\d+(?:\.\d+)?$/.test(raw) && !/^\d+(?::[0-5]\d){1,2}(?:\.\d+)?$/.test(raw)) throw new Error('Use seconds or mm:ss for clip times.');
-  return raw.split(':').reduce((sum, part) => sum * 60 + Number(part), 0);
+  const value = raw.split(':').reduce((sum, part) => sum * 60 + Number(part), 0);
+  if (!Number.isFinite(value)) throw new Error('Enter a time within the recording.');
+  return value;
 }
 async function api(url, options) {
-  const res = await fetch(url, options); const body = await res.json();
-  if (!res.ok) throw new Error(typeof body.detail === 'string' ? body.detail : 'Check the clip times and try again.');
+  const res = await fetch(url, options);
+  const body = await res.json().catch(() => null);
+  if (!res.ok || !body) {
+    const detail = body?.detail;
+    const reason = typeof detail === 'string' ? detail : detail?.[0]?.msg;
+    throw new Error(reason || 'The clipper could not complete the request. Try again.');
+  }
   return body;
 }
+function previewUnavailable() {
+  $('sourceActions').hidden = true;
+  $('source').hidden = true;
+  $('previewNote').textContent = 'Your browser can’t preview this format. Use a local player to find the times, then enter them here. H.264 MP4 is the most compatible format for preview.';
+}
+$('source').onloadedmetadata = () => {
+  if (!$('source').videoWidth) {
+    previewUnavailable();
+    return;
+  }
+  $('sourceActions').hidden = false;
+  $('previewNote').textContent = '';
+};
+$('source').onerror = previewUnavailable;
 $('uploadForm').onsubmit = async event => {
-  event.preventDefault(); if (rendering) return;
+  event.preventDefault();
+  if (uploading || rendering) return;
   const file = $('file').files[0]; if (!file) return;
   if (file.size > 2 * 1024 ** 3) { message('Choose a recording smaller than 2 GB.', true); return; }
-  sourceId = null; $('render').disabled = true; $('uploadButton').disabled = true; $('results').replaceChildren();
-  $('source').hidden = true; $('sourceActions').hidden = true; $('sourceInfo').textContent = '';
+  uploading = true;
+  $('render').disabled = true;
+  $('uploadButton').disabled = true;
   message('Opening recording…');
   try {
     const data = new FormData(); data.append('file', file);
     const result = await api('/api/local-clips/sources', { method: 'POST', body: data });
-    sourceId = result.id; $('source').src = result.video_url; $('source').hidden = false; $('sourceActions').hidden = false;
+    sourceId = result.id;
+    sourceStart = result.video_start ?? 0;
+    sourceDuration = result.duration;
+    $('sourceActions').hidden = true;
+    $('source').hidden = false;
+    $('previewNote').textContent = 'Loading preview…';
+    $('source').src = result.video_url;
     $('sourceInfo').textContent = `${result.name} · ${result.width} × ${result.height} · ${result.duration.toFixed(1)} seconds`;
-    $('ranges').replaceChildren(); addRange('0', String(Math.min(20, result.duration).toFixed(2)));
-    $('render').disabled = false; message('Recording ready. Choose the setup and payoff for each clip.');
+    $('ranges').replaceChildren(); addRange();
+    $('results').replaceChildren();
+    message('Recording ready. Choose the setup and payoff for each clip.');
   } catch (error) { message(error.message, true); }
-  finally { $('uploadButton').disabled = false; }
+  finally {
+    uploading = false;
+    $('render').disabled = !sourceId;
+    $('uploadButton').disabled = false;
+  }
 };
 $('add').onclick = () => addRange();
 $('layout').onchange = () => { $('focusWrap').hidden = $('layout').value !== 'crop'; };
 $('markStart').onclick = () => { if (focusedRange) focusedRange.querySelector('.start').value = $('source').currentTime.toFixed(2); };
 $('markEnd').onclick = () => { if (focusedRange) focusedRange.querySelector('.end').value = $('source').currentTime.toFixed(2); };
+function showClip(clip) {
+  const card = document.createElement('div'), video = document.createElement('video'), title = document.createElement('p'), link = document.createElement('a');
+  video.controls = true; video.preload = 'metadata'; video.src = clip.url;
+  title.textContent = clip.hook || clip.name; link.href = clip.url; link.download = clip.name; link.className = 'button'; link.textContent = 'Download MP4';
+  card.append(video, title, link); $('results').append(card);
+}
 $('render').onclick = async () => {
-  if (!sourceId || rendering) return;
+  if (!sourceId || uploading || rendering) return;
   try {
     const clips = [...$('ranges').children].map(item => ({start: seconds(item.querySelector('.start').value), end: seconds(item.querySelector('.end').value), hook: item.querySelector('.hook').value.trim()}));
-    if (clips.some(c => c.end - c.start < 1 || c.end - c.start > 180)) throw new Error('Each clip must be between 1 and 180 seconds.');
+    for (const clip of clips) {
+      const duration = Number((clip.end - clip.start).toFixed(6));
+      if (duration < 1 || duration > 180) throw new Error('Each clip must be between 1 and 180 seconds.');
+      if (clip.start < sourceStart - 0.05) throw new Error('A clip starts before the source video track.');
+      if (clip.end > sourceDuration + 0.01) throw new Error('A clip ends after the source video track.');
+    }
     rendering = true; $('render').disabled = true; $('uploadButton').disabled = true; $('results').replaceChildren();
     const body = {source_id: sourceId, clips, layout: $('layout').value, focus: Number($('focus').value), mute: $('mute').checked};
     const job = await api('/api/local-clips/jobs', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
     message('Clips queued. You can keep this page open while they render.');
+    let displayed = 0;
     while (true) {
       const state = await api(`/api/local-clips/jobs/${job.id}`);
+      for (const clip of state.clips.slice(displayed)) showClip(clip);
+      displayed = state.clips.length;
       message(`${state.status === 'completed' ? 'Ready' : state.status} · ${state.clips.length}/${clips.length} clips`);
       if (['failed', 'interrupted'].includes(state.status)) throw new Error(state.error || 'Rendering stopped. Try again.');
-      if (state.status === 'completed') {
-        for (const clip of state.clips) {
-          const card = document.createElement('div'), video = document.createElement('video'), title = document.createElement('p'), link = document.createElement('a');
-          video.controls = true; video.preload = 'metadata'; video.src = clip.url;
-          title.textContent = clip.hook || clip.name; link.href = clip.url; link.download = clip.name; link.className = 'button'; link.textContent = 'Download MP4';
-          card.append(video, title, link); $('results').append(card);
-        }
-        break;
-      }
+      if (state.status === 'completed') break;
       await new Promise(resolve => setTimeout(resolve, 1500));
     }
   } catch (error) { message(error.message, true); }

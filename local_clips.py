@@ -30,6 +30,21 @@ _render_lock = threading.Lock()
 _active_jobs: set[str] = set()
 MAX_UPLOAD_BYTES = 2 * 1024**3
 MAX_STORE_BYTES = 20 * 1024**3
+_RECORDING_TYPES = {
+    "mov": "video/mp4",
+    "matroska": "video/x-matroska",
+    "avi": "video/x-msvideo",
+    "mpegts": "video/mp2t",
+    "mpeg": "video/mpeg",
+    "flv": "video/x-flv",
+    "asf": "video/x-ms-asf",
+    "ogg": "video/ogg",
+    "mxf": "application/mxf",
+}
+_INPUT_OPTIONS = (
+    "-protocol_whitelist", "file,pipe",
+    "-format_whitelist", ",".join(_RECORDING_TYPES),
+)
 
 
 def _local_origin(request: Request):
@@ -53,22 +68,59 @@ def _item(root: Path, kind: str, item_id: str) -> Path:
     return result
 
 
+def _seconds(value) -> float | None:
+    try:
+        number = float(value)
+    except (ValueError, TypeError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _video_timing(container: dict, stream: dict) -> tuple[float, float]:
+    track_start = _seconds(stream.get("start_time")) or 0
+    file_start = _seconds(container.get("start_time")) or 0
+    start = max(0, track_start - file_start)
+    duration = _seconds(stream.get("duration"))
+    if duration is not None and duration > 0:
+        return start, start + duration
+    if container["format_name"].startswith("matroska,"):
+        # OBS-style Matroska uses a track end timestamp tag.
+        tag = stream.get("tags", {}).get("DURATION") or ""
+        if re.fullmatch(r"\d{2}:[0-5]\d:[0-5]\d(?:\.\d+)?", tag):
+            hours, minutes, seconds = map(float, tag.split(":"))
+            end = hours * 3600 + minutes * 60 + seconds
+            file_duration = _seconds(container.get("duration"))
+            if start < end <= (file_duration or end) + .05:
+                return start, end
+    return start, _seconds(container.get("duration")) or 0
+
+
 def probe(path: Path) -> dict:
     try:
         result = subprocess.run(
-            [os.environ.get("FFPROBE_BINARY", "ffprobe"), "-v", "error", "-protocol_whitelist", "file,pipe",
+            [os.environ.get("FFPROBE_BINARY", "ffprobe"), "-v", "error", *_INPUT_OPTIONS,
              "-show_format", "-show_streams", "-of", "json", str(path)],
-            capture_output=True, text=True, timeout=30, check=True)
+            capture_output=True, encoding="utf-8", errors="replace", timeout=30, check=True)
         data = json.loads(result.stdout)
-        stream = next(s for s in data["streams"] if s["codec_type"] == "video")
-        duration = float(data.get("format", {}).get("duration") or stream.get("duration"))
-        if not math.isfinite(duration) or duration <= 0 or duration > 8 * 3600:
+        streams = data["streams"]
+        stream = next(s for s in streams if s["codec_type"] == "video" and not
+                      any(s.get("disposition", {}).get(flag)
+                          for flag in ("attached_pic", "timed_thumbnails")))
+        container = data["format"]
+        video_start, duration = _video_timing(container, stream)
+        width, height = int(stream["width"]), int(stream["height"])
+        if not (video_start < duration <= 8 * 3600 and width > 0 and height > 0):
             raise ValueError("unsupported duration")
-        return {"duration": duration, "width": int(stream["width"]),
-                "height": int(stream["height"]),
-                "audio": any(s.get("codec_type") == "audio" for s in data["streams"])}
+        media_type = _RECORDING_TYPES[container["format_name"].split(",")[0]]
+        if container.get("tags", {}).get("major_brand", "").strip() == "qt":
+            media_type = "video/quicktime"
+        return {"duration": duration, "video_start": video_start,
+                "width": width, "height": height, "media_type": media_type,
+                "audio": any(s["codec_type"] == "audio" for s in streams)}
+    except FileNotFoundError as exc:
+        raise HTTPException(503, "FFprobe is missing. Check the FFmpeg installation and restart the clipper.") from exc
     except (subprocess.SubprocessError, ValueError, KeyError, StopIteration, TypeError) as exc:
-        raise HTTPException(400, "Use a readable video no longer than eight hours.") from exc
+        raise HTTPException(400, "Use a recording with a playable video track, up to eight hours long.") from exc
 
 
 class ClipRange(BaseModel):
@@ -77,9 +129,13 @@ class ClipRange(BaseModel):
     end: float = Field(gt=0)
     hook: str = Field(default="", max_length=100)
 
+    @property
+    def duration(self) -> float:
+        return round(self.end - self.start, 6)
+
     @model_validator(mode="after")
     def duration_bounds(self):
-        if not 1 <= self.end - self.start <= 180:
+        if not 1 <= self.duration <= 180:
             raise ValueError("Each clip must be between 1 and 180 seconds.")
         return self
 
@@ -97,15 +153,15 @@ def filtergraph(layout: str, focus: float, width: int = 1080, hook: bool = False
     height = width * 16 // 9
     if layout == "fit":
         # Keep the complete gameplay picture and HUD; only the filler is blurred.
-        graph = (f"[0:v]split=2[b][f];[b]scale=270:480:force_original_aspect_ratio=increase,"
+        graph = (f"[0:V:0]split=2[b][f];[b]scale=270:480:force_original_aspect_ratio=increase,"
                  f"crop=270:480,boxblur=12:2,scale={width}:{height}[bg];"
                  f"[f]scale={width}:{height}:force_original_aspect_ratio=decrease[fg];"
                  "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[base]")
     else:
-        graph = (f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
+        graph = (f"[0:V:0]scale={width}:{height}:force_original_aspect_ratio=increase,"
                  f"crop={width}:{height}:(iw-ow)*{focus / 100:.6f}:(ih-oh)/2,"
                  "setsar=1[base]")
-    return graph + (";[base][1:v]overlay=0:0[out]" if hook else ";[base]null[out]")
+    return graph + (";[base][1:v]overlay=0:0:shortest=1[out]" if hook else ";[base]null[out]")
 
 
 def _hook_image(text: str, path: Path, width: int):
@@ -145,23 +201,30 @@ def render_clip(source: Path, output: Path, clip: ClipRange, batch: ClipBatch,
     if hook:
         _hook_image(hook, overlay, width)
     base = [os.environ.get("FFMPEG_BINARY", "ffmpeg"), "-hide_banner", "-loglevel", "error", "-y", "-nostdin",
-            "-ss", str(clip.start), "-protocol_whitelist", "file,pipe", "-i", str(source)]
+            "-ss", str(clip.start), *_INPUT_OPTIONS, "-i", str(source)]
     if hook:
         base += ["-loop", "1", "-i", str(overlay)]
-    base += ["-t", str(clip.end - clip.start), "-filter_complex_threads", "1",
+    base += ["-t", str(clip.duration), "-filter_complex_threads", "1",
              "-filter_complex", filtergraph(batch.layout, batch.focus, width, bool(hook)),
              "-map", "[out]"]
     base += ["-an"] if batch.mute else ["-map", "0:a?", "-c:a", "aac", "-b:a", "160k"]
     encoding = video_encode_args(QUALITY_FAST)
     tail = ["-r", "30", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output)]
-    result = subprocess.run(base + encoding + tail, capture_output=True, text=True, timeout=900)
+    result = subprocess.run(base + encoding + tail, capture_output=True, encoding="utf-8",
+                            errors="replace", timeout=900)
     if result.returncode and "h264_nvenc" in encoding:
         encoding = ["-c:v", "libx264", "-preset", "fast", "-crf", "18", "-threads", "2"]
-        result = subprocess.run(base + encoding + tail, capture_output=True, text=True, timeout=900)
+        result = subprocess.run(base + encoding + tail, capture_output=True, encoding="utf-8",
+                                errors="replace", timeout=900)
     if result.returncode:
         raise RuntimeError("FFmpeg could not render this clip: " + result.stderr[-1000:])
-    if not output.exists() or output.stat().st_size == 0:
-        raise RuntimeError("FFmpeg returned an empty clip.")
+    try:
+        probe(output)
+    except HTTPException as exc:
+        output.unlink(missing_ok=True)
+        if exc.status_code == 503:
+            raise
+        raise RuntimeError("This range contains no playable video. Choose a range with video frames.") from exc
     return "h264_nvenc" if "h264_nvenc" in encoding else "libx264"
 
 
@@ -200,7 +263,12 @@ def create_router(data_root: str | Path) -> APIRouter:
                         raise HTTPException(413, "Recordings must be smaller than 2 GB.")
                     out.write(chunk)
             info = probe(path)
-            info.update(id=source_id, name=(file.filename or "recording").replace("\\", "/").split("/")[-1][:120])
+            if round(info["duration"] - info["video_start"], 6) < 1:
+                raise HTTPException(400, "The recording needs at least one second of video.")
+            name = (file.filename or "recording").replace("\\", "/").split("/")[-1][:120]
+            if info["media_type"] == "video/x-matroska" and name.lower().endswith(".webm"):
+                info["media_type"] = "video/webm"
+            info.update(id=source_id, name=name)
             write_json_atomic(str(folder / "source.json"), info)
             return {**info, "video_url": f"/api/local-clips/sources/{source_id}/video"}
         except Exception:
@@ -209,8 +277,11 @@ def create_router(data_root: str | Path) -> APIRouter:
 
     @router.get("/api/local-clips/sources/{source_id}/video")
     def source_video(source_id: str):
-        folder, _ = source_info(source_id)
-        return FileResponse(folder / "source.mp4")
+        folder, info = source_info(source_id)
+        source = folder / "source.mp4"
+        if not source.is_file():
+            raise HTTPException(404, "Recording no longer exists. Open it again.")
+        return FileResponse(source, media_type=info.get("media_type", "video/mp4"))
 
     def run_batch(job_id: str, batch: ClipBatch):
         folder = _item(root, "jobs", job_id)
@@ -226,7 +297,7 @@ def create_router(data_root: str | Path) -> APIRouter:
                     name = f"clip_{index:02d}.mp4"
                     encoder = render_clip(source_folder / "source.mp4", folder / name, clip, batch)
                     state["clips"].append({"name": name, "hook": clip.hook, "encoder": encoder,
-                                           "duration": clip.end - clip.start,
+                                           "duration": clip.duration,
                                            "url": f"/api/local-clips/jobs/{job_id}/files/{name}"})
                     write_json_atomic(str(status_path), state)
                 state["status"] = "completed"
@@ -238,9 +309,16 @@ def create_router(data_root: str | Path) -> APIRouter:
 
     @router.post("/api/local-clips/jobs", status_code=202)
     def submit(batch: ClipBatch, background: BackgroundTasks):
-        _, info = source_info(batch.source_id)
+        folder, info = source_info(batch.source_id)
+        source = folder / "source.mp4"
+        if not source.is_file():
+            raise HTTPException(404, "Recording no longer exists. Open it again.")
+        if "video_start" not in info:  # Earlier uploads stored the container duration.
+            info = probe(source)
+        if any(c.start < info["video_start"] - .05 for c in batch.clips):
+            raise HTTPException(400, "A clip starts before the source video track.")
         if any(c.end > info["duration"] + .01 for c in batch.clips):
-            raise HTTPException(400, "A clip ends after the source recording.")
+            raise HTTPException(400, "A clip ends after the source video track.")
         job_id = uuid.uuid4().hex
         folder = _item(root, "jobs", job_id)
         folder.mkdir(parents=True)

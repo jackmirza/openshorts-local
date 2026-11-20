@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -18,7 +19,8 @@ import local_clips as lc
 def workspace(tmp_path, monkeypatch):
     app = FastAPI()
     app.include_router(lc.create_router(tmp_path))
-    info = {"duration": 60.0, "width": 1920, "height": 1080, "audio": False}
+    info = {"duration": 60.0, "video_start": 0.0, "width": 1920, "height": 1080,
+            "audio": False, "media_type": "video/mp4"}
     monkeypatch.setattr(lc, "probe", lambda path: dict(info))
     return TestClient(app), tmp_path
 
@@ -72,12 +74,70 @@ def test_invalid_ranges_never_reach_the_renderer(start, end):
         lc.ClipRange(start=start, end=end)
 
 
+def test_exactly_one_second_at_fractional_timestamps_is_allowed():
+    assert lc.ClipRange(start=1.01, end=2.01).duration == 1
+
+
+@pytest.mark.parametrize('video_fields', [
+    {'duration': '2.0', 'start_time': '0.0'},
+    {'tags': {'DURATION': '00:00:02.000000000'}},
+])
+def test_probe_uses_video_end_when_audio_continues(tmp_path, monkeypatch, video_fields):
+    formats = 'matroska,webm' if 'tags' in video_fields else 'mov,mp4,m4a,3gp,3g2,mj2'
+    meta = {'format': {'format_name': formats, 'duration': '6'},
+            'streams': [
+                {'codec_type': 'video', 'width': 320, 'height': 180, **video_fields},
+                {'codec_type': 'audio', 'duration': '6'},
+            ]}
+    monkeypatch.setattr(lc.subprocess, 'run', lambda *_args, **_kwargs:
+                        SimpleNamespace(stdout=json.dumps(meta)))
+    info = lc.probe(tmp_path / 'source.mp4')
+    assert info['duration'] == 2
+    assert info['audio'] is True
+
+
+def test_cover_art_does_not_count_as_a_video_track(tmp_path, monkeypatch):
+    meta = {'format': {'format_name': 'mov,mp4', 'duration': '6'},
+            'streams': [{'codec_type': 'video', 'width': 64, 'height': 64,
+                         'disposition': {'attached_pic': 1}}, {'codec_type': 'audio'}]}
+    monkeypatch.setattr(lc.subprocess, 'run', lambda *_args, **_kwargs:
+                        SimpleNamespace(stdout=json.dumps(meta)))
+    with pytest.raises(lc.HTTPException, match='playable video track'):
+        lc.probe(tmp_path / 'source.mp4')
+
+
 def test_ranges_past_the_recording_are_rejected(workspace):
     client, root = workspace
     source = upload(client)
     response = client.post('/api/local-clips/jobs', json={
         'source_id': source['id'], 'clips': [{'start': 50, 'end': 70}]})
     assert response.status_code == 400
+    assert not (root / 'jobs').exists()
+
+
+def test_old_upload_is_probed_again_before_clipping(workspace, monkeypatch):
+    client, root = workspace
+    source = upload(client)
+    metadata = root / 'sources' / source['id'] / 'source.json'
+    info = json.loads(metadata.read_text())
+    del info['video_start']
+    metadata.write_text(json.dumps(info))
+    monkeypatch.setattr(lc, 'probe', lambda _path: {'duration': 2.0, 'video_start': 0.0})
+    response = client.post('/api/local-clips/jobs', json={
+        'source_id': source['id'], 'clips': [{'start': 3, 'end': 5}]})
+    assert response.status_code == 400
+    assert not (root / 'jobs').exists()
+
+
+def test_ranges_before_the_video_track_starts_are_rejected(workspace, monkeypatch):
+    client, root = workspace
+    monkeypatch.setattr(lc, 'probe', lambda _path: {
+        'duration': 5, 'video_start': 2, 'media_type': 'video/mp4'})
+    source = upload(client)
+    response = client.post('/api/local-clips/jobs', json={
+        'source_id': source['id'], 'clips': [{'start': 0, 'end': 1.5}]})
+    assert response.status_code == 400
+    assert 'before the source video track' in response.json()['detail']
     assert not (root / 'jobs').exists()
 
 
@@ -103,16 +163,25 @@ def test_batch_calls_local_renderer_and_exposes_only_finished_files(workspace, m
     assert (root / 'jobs' / job_id / 'recipe.json').exists()
 
 
-def test_renderer_failure_is_reported_and_does_not_offer_empty_files(workspace, monkeypatch):
+@pytest.mark.parametrize('finished', [0, 1])
+def test_renderer_failure_keeps_only_the_finished_clips(workspace, monkeypatch, finished):
     client, _ = workspace
     source = upload(client)
-    def fail(*args):
+
+    def fail(_source, out, clip, _batch):
+        if clip.start < finished:
+            out.write_bytes(b'completed clip')
+            return 'libx264'
+        out.write_bytes(b'incomplete clip')
         raise RuntimeError('Encoder unavailable')
     monkeypatch.setattr(lc, 'render_clip', fail)
     job = client.post('/api/local-clips/jobs', json={
-        'source_id': source['id'], 'clips': [{'start': 0, 'end': 20}]}).json()
+        'source_id': source['id'], 'clips': [{'start': i, 'end': i + 2} for i in range(finished + 1)]}).json()
     status = client.get(f'/api/local-clips/jobs/{job["id"]}').json()
-    assert status['status'] == 'failed' and status['clips'] == []
+    assert status['status'] == 'failed' and len(status['clips']) == finished
+    if finished:
+        assert client.get(status['clips'][0]['url']).content == b'completed clip'
+    assert client.get(f'/api/local-clips/jobs/{job["id"]}/files/clip_{finished + 1:02d}.mp4').status_code == 404
 
 
 def test_restarted_jobs_are_not_left_processing_forever(workspace):
@@ -132,12 +201,30 @@ def test_hook_text_is_an_image_and_never_part_of_the_filtergraph(tmp_path, monke
         return type('Result', (), {'returncode': 0, 'stderr': ''})()
     monkeypatch.setattr(lc.subprocess, 'run', fake_run)
     monkeypatch.setattr(lc, 'video_encode_args', lambda *_: ['-c:v', 'libx264'])
+    monkeypatch.setattr(lc, 'probe', lambda _path: {'duration': 5})
     batch = lc.ClipBatch(source_id='a' * 32, clips=[
         {'start': 0, 'end': 5, 'hook': "text';movie=/private/file"}])
     lc.render_clip(tmp_path / 'input.mp4', tmp_path / 'out.mp4', batch.clips[0], batch, width=360)
     graph = seen[0][seen[0].index('-filter_complex') + 1]
     assert 'private' not in graph
     assert (tmp_path / 'out.png').is_file()
+
+
+def test_successful_ffmpeg_exit_does_not_accept_audio_only_output(tmp_path, monkeypatch):
+    def run(cmd, **kwargs):
+        if '-show_streams' in cmd:
+            return SimpleNamespace(stdout=json.dumps({'format': {'duration': '2'},
+                                                     'streams': [{'codec_type': 'audio'}]}))
+        Path(cmd[-1]).write_bytes(b'audio-only MP4')
+        return SimpleNamespace(returncode=0, stderr='')
+
+    monkeypatch.setattr(lc.subprocess, 'run', run)
+    monkeypatch.setattr(lc, 'video_encode_args', lambda *_: ['-c:v', 'libx264'])
+    batch = lc.ClipBatch(source_id='a' * 32, clips=[{'start': 3, 'end': 5}])
+    output = tmp_path / 'out.mp4'
+    with pytest.raises(RuntimeError, match='contains no playable video'):
+        lc.render_clip(tmp_path / 'source.mp4', output, batch.clips[0], batch)
+    assert not output.exists()
 
 
 def test_runtime_files_are_not_committed():
@@ -155,6 +242,7 @@ def test_gpu_encoder_failure_falls_back_to_cpu(tmp_path, monkeypatch):
         return type('Result', (), {'returncode': int(failed), 'stderr': 'GPU busy' if failed else ''})()
     monkeypatch.setattr(lc.subprocess, 'run', run)
     monkeypatch.setattr(lc, 'video_encode_args', lambda *_: ['-c:v', 'h264_nvenc'])
+    monkeypatch.setattr(lc, 'probe', lambda _path: {'duration': 5})
     batch = lc.ClipBatch(source_id='a' * 32, clips=[{'start': 0, 'end': 5}])
     encoder = lc.render_clip(tmp_path / 'input.mp4', tmp_path / 'out.mp4', batch.clips[0], batch)
     assert encoder == 'libx264' and len(attempts) == 2

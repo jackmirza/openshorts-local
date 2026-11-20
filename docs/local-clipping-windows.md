@@ -29,6 +29,8 @@ Open **http://localhost:5175/local-clips**. The hidden background worker stays
 running when the setup terminal closes. It binds only to the local machine.
 Double-click **Stop Clipping.cmd** when finished; recordings and exports are
 kept. These launchers do not change PowerShell's execution policy.
+If you use the PowerShell launcher's `-Port` option, stop the existing worker
+first. Only one worker per checkout can use the local recording store.
 
 ## Make clips
 
@@ -42,8 +44,11 @@ kept. These launchers do not change PowerShell's execution policy.
 
 Output is 1080×1920 at 30 fps. Source audio is kept unless **Mute source audio**
 is selected. NVENC is used when available, with an x264 fallback after a GPU
-encoder failure. Cropping and captions do not establish rights to repost a
-creator's recording, the game's assets or its music.
+encoder failure. Clip ranges must start and end within the video track.
+For browser playback, H.264 MP4 with AAC audio is the most compatible choice.
+If your browser cannot preview a recording, find timestamps in a local media
+player and enter them in the clipper. Cropping and captions do not establish
+rights to repost a creator's recording, the game's assets or its music.
 
 Recordings and finished jobs are kept in `local-data/`; settings and logs are
 in `.local-checks/`. These folders, virtual environments and credentials are
