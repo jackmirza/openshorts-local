@@ -378,7 +378,14 @@ def snap_clip_to_words(start, end, words, video_duration,
         if later and later[0] - new_start <= max_duration:
             new_end = min(float(video_duration), later[0] + 0.2)
         else:
-            return original
+            # A clip near the end may need to start at an earlier word.
+            new_end = min(new_end, float(video_duration))
+            earliest = max(0.0, new_end - max_duration)
+            latest = new_end - min_duration
+            earlier = [s for s in starts if earliest <= s <= latest]
+            if not earlier:
+                return original
+            new_start = max(earlier)
     if new_end - new_start > max_duration:
         target = new_start + max_duration
         earlier = [e for e in ends if new_start < e <= target]

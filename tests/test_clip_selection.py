@@ -85,6 +85,10 @@ class TestSnapClipToWords:
         start, end = snap_clip_to_words(10.0, 24.5, words, 80.0)
         assert end - start >= 15.0
 
+    def test_short_proposal_near_video_end_extends_to_an_earlier_word(self):
+        start, end = snap_clip_to_words(72.0, 79.6, self._words(), 80.0)
+        assert (start, end) == (64.0, 80.0)
+
     def test_duration_capped_at_maximum(self):
         words = self._words()
         start, end = snap_clip_to_words(0.0, 59.9, words, 80.0)
