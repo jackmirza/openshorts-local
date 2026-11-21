@@ -4,9 +4,8 @@ This fork adds a small gameplay workspace to OpenShorts. It uses local FFmpeg
 and can use NVIDIA NVENC for encoding. Basic clipping requires no Gemini,
 Upload-Post, subscription, Docker container or large language model download.
 
-Moment selection in this workspace is manual. It does not automatically find
-the funniest gameplay events or create speech captions. The upstream AI
-picker remains a separate option below.
+Moment selection in this workspace is manual. The Docker setup below adds
+automatic highlight selection and speech captions.
 
 ## Start
 
@@ -59,7 +58,7 @@ that export. Reload or bookmark it to recover the downloads and clip ranges.
 If the worker stopped during an export, reopen the same link to see any
 finished clips and run the saved ranges again.
 
-## Original AI picker (optional)
+## Automatic Shorts inbox
 
 The full OpenShorts application needs Docker Desktop with the WSL2 engine and
 the larger processing dependencies. This fork includes `compose.local.yml` and
@@ -85,11 +84,22 @@ JavaScript runtimes. It downloads the locked Python packages in parallel,
 resumes incomplete transfers where supported, and caches completed wheels
 across builds.
 
-The transcript picker works from spoken content. Mostly silent gameplay
-instead uses the upstream Gemini vision path, which needs a key and has quota
-limits; a text-only Ollama model cannot replace it. Use the timestamp workspace
-for silent gameplay when you do not want cloud analysis. Publishing and paid
-AI actor generation are not configured by this setup.
+1. Set your download destination to `shorts-inbox/` or put a completed video
+   there. Use recordings you own or have permission from the creator to reuse.
+   The inbox accepts MP4, MKV, WebM, MOV and other common video files up to 2 GB.
+2. Keep Docker Desktop and the local stack running. The watcher waits for a
+   file to stabilize, then queues it once and finishes one inbox job at a time.
+3. Open `shorts-ready/` to review the finished 30–45 second vertical MP4s.
+   Each source gets a folder and a `clips.json` file with the original time
+   ranges, suggested titles and selection reasons. See `jobs.json` for progress
+   and any processing errors. The original stays in the inbox.
+
+Whisper supplies word timings for captions and clip boundaries. Ollama scores
+spoken sections for their opening hook, standalone context and payoff. With
+little or no speech, the picker uses frame-to-frame activity to propose
+gameplay highlights.
+The number of clips depends on how many distinct moments fit the duration
+band. Review the picks and publish them from your own YouTube account.
 
 ## Verify exports
 

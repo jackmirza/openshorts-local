@@ -4408,11 +4408,22 @@ async def lifespan(app: FastAPI):
         from cloud import geoip as _geoip
         _geoip.start(OUTPUT_DIR, wanted=lambda: bool(_queue_mode.slow_countries())
                      and not _queue_mode.killed())
-    yield
-    # Cleanup (optional: cancel worker)
-    if BILLING_ENABLED:
-        # Last chunk of this instance's log to storage (cloud/log_archive.py).
-        await asyncio.to_thread(cloud.log_archive.flush)
+    inbox_task = None
+    inbox, ready = os.getenv("SHORTS_INBOX_DIR"), os.getenv("SHORTS_READY_DIR")
+    if LOCAL_CLIPPER_ENABLED and llm_backend.active() and inbox and ready:
+        from local_shorts import ShortsInbox
+        watcher = ShortsInbox(inbox, ready, OUTPUT_DIR, MAX_FILE_SIZE_MB * 1024**2)
+        inbox_task = asyncio.create_task(watcher.run(app, lambda: not _draining, _job_error_text))
+    try:
+        yield
+    finally:
+        if inbox_task is not None:
+            inbox_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await inbox_task
+        if BILLING_ENABLED:
+            # Last chunk of this instance's log to storage (cloud/log_archive.py).
+            await asyncio.to_thread(cloud.log_archive.flush)
 
 app = FastAPI(lifespan=lifespan)
 
@@ -6168,7 +6179,13 @@ async def process_endpoint(
                    else "url" if url else "file"),
     }
 
-    job_id = str(uuid.uuid4())
+    inbox_job_id = None
+    if LOCAL_CLIPPER_ENABLED and upload_slot:
+        from local_shorts import JOB_SCOPE_KEY
+        # The inbox attaches this to its in-process ASGI call. HTTP clients
+        # cannot set it through a body field or header.
+        inbox_job_id = request.scope.get(JOB_SCOPE_KEY)
+    job_id = inbox_job_id or str(uuid.uuid4())
     job_output_dir = os.path.join(OUTPUT_DIR, job_id)
     _begin_job_dir(job_id)  # the sweeps keep its dir and source until it is in `jobs`
     os.makedirs(job_output_dir, exist_ok=True)
@@ -6179,6 +6196,9 @@ async def process_endpoint(
     # running this server. Every job then dies on `import cv2`. The quality
     # probe above already gets this right.
     cmd = [sys.executable, "-u", "main.py"] # -u for unbuffered
+    if inbox_job_id:
+        # The command is persisted in the resume manifest.
+        cmd.append("--local-shorts")
     env = child_env()
     if api_key:
         env["GEMINI_API_KEY"] = api_key # Override with key from request
@@ -6283,7 +6303,7 @@ async def process_endpoint(
         # with the job like any other upload; the slot is consumed.
         src = upload_slot["path"]
         src_duration = await asyncio.to_thread(_media_duration_seconds, src)
-        if MIN_SOURCE_SECONDS > 0 and 0 < src_duration < MIN_SOURCE_SECONDS:
+        if not inbox_job_id and MIN_SOURCE_SECONDS > 0 and 0 < src_duration < MIN_SOURCE_SECONDS:
             await asyncio.to_thread(_discard_rejected_source, None, job_output_dir)
             _reject_short_source(src_duration)
         input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{upload_slot['filename']}")

@@ -34,7 +34,7 @@ def _clip(start, window_id, score=80):
     }
 
 
-def _run(monkeypatch, detail_responses):
+def _run(monkeypatch, detail_responses, duration=600.0, **options):
     """Drive get_viral_clips with canned stage results; returns (clips, calls)."""
     calls = []
 
@@ -55,9 +55,10 @@ def _run(monkeypatch, detail_responses):
         return {"shorts": detail_responses.pop(0)}, None
 
     monkeypatch.setattr(main, "_run_gemini_stage", fake_stage)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setattr(main.genai, "Client", lambda api_key=None: object())
-    out = main.get_viral_clips(_transcript(), 600.0)
+    out = main.get_viral_clips(_transcript(int(duration // 15)), duration, **options)
     return (out or {}).get("shorts", []), calls
 
 
@@ -99,3 +100,15 @@ def test_scoring_fills_the_shortlist_it_targets(monkeypatch):
                                        for i in range(6)]])
     detail_windows = [c[1] for c in calls if c[0] == "detail"][0]
     assert len(detail_windows) == 8
+
+
+def test_shorts_preset_retries_even_when_the_only_window_was_used(monkeypatch):
+    first = [_clip(0, "window_001"), _clip(8, "window_001", score=60),
+             _clip(86, "window_001")]
+    second = [_clip(45, "window_001")]
+    clips, calls = _run(monkeypatch, [first, second], 90, shorts_preset=True)
+
+    assert [ids for stage, ids in calls if stage == "detail"] == [["window_001"], ["window_001"]]
+    assert len(clips) == 2
+    assert clips[0]["end"] <= clips[1]["start"]
+    assert all(30 <= c["end"] - c["start"] <= 45 for c in clips)

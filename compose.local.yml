@@ -15,6 +15,8 @@ services:
       BILLING_ENABLED: "0"
       ENABLE_LOCAL_CLIPPER: "1"
       LOCAL_CLIP_DIR: /app/local-data
+      SHORTS_INBOX_DIR: /app/shorts-inbox
+      SHORTS_READY_DIR: /app/shorts-ready
       LLM_BASE_URL: http://ollama:11434/v1
       LLM_MODEL: qwen2.5:7b
       LLM_TIMEOUT: "900"
@@ -48,6 +50,8 @@ services:
       - ./output:/app/output
       - ./uploads:/app/uploads
       - ./local-data:/app/local-data
+      - ./shorts-inbox:/app/shorts-inbox:ro
+      - ./shorts-ready:/app/shorts-ready
       - huggingface:/app/.cache/huggingface
     deploy:
       resources:

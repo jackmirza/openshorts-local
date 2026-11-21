@@ -6,6 +6,9 @@ the logic stays unit-testable without the heavy video dependencies.
 """
 import math
 
+SHORTS_MIN_SECONDS = 30.0
+SHORTS_MAX_SECONDS = 45.0
+
 # USD per 1M tokens (input, output incl. thinking), from ai.google.dev pricing.
 MODEL_PRICES = {
     "gemini-3.5-flash": (1.50, 9.00),
@@ -280,6 +283,43 @@ def build_transcript_windows(transcript_result, video_duration,
             "end": round(float(video_duration), 3),
             "text": str(transcript_result.get("text", "") or ""),
         })
+    return windows
+
+
+def shorts_scoring_windows(transcript, words, video_duration, window_seconds):
+    """Give the editor sentence timings and respect long pauses between scenes."""
+    phrases = []
+    first = 0
+    for i, word in enumerate(words):
+        next_pause = i + 1 == len(words) or words[i + 1]["s"] - word["e"] >= .8
+        if next_pause or word["w"].rstrip(" \"'”’").endswith((".", "?", "!", "。", "？", "！")):
+            phrases.append({
+                "start": words[first]["s"], "end": word["e"],
+                "text": " ".join(w["w"].strip() for w in words[first:i + 1]),
+            })
+            first = i + 1
+    phrases = phrases or transcript["segments"]
+    sections = [[]]
+    for phrase in phrases:
+        if sections[-1] and phrase["start"] - sections[-1][-1]["end"] >= 2.5:
+            sections.append([])
+        sections[-1].append(phrase)
+    eligible = [section for section in sections if section
+                and section[-1]["end"] - section[0]["start"] >= SHORTS_MIN_SECONDS]
+    # With multiple complete stretches of speech, keep their boundaries.
+    # Continuous commentary and fragmented speech still get overlapping windows.
+    separated = len(eligible) >= 2
+    windows = []
+    for section in eligible if separated else [phrases]:
+        for window in build_transcript_windows({"segments": section}, video_duration, window_seconds):
+            window["id"] = f"window_{len(windows) + 1:03d}"
+            window["whole_section"] = (separated and window["end"] - window["start"] <= 44.85
+                                       and window["start"] == round(section[0]["start"], 3)
+                                       and window["end"] == round(section[-1]["end"], 3))
+            window["timed_text"] = "\n".join(
+                f"[{p['start']:.2f}–{p['end']:.2f}] {p['text'].strip()}" for p in section
+                if window["start"] <= round(p["start"], 3) < window["end"])
+            windows.append(window)
     return windows
 
 

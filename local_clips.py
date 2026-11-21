@@ -99,7 +99,7 @@ def _video_timing(container: dict, stream: dict) -> tuple[float, float]:
     return start, _seconds(container.get("duration")) or 0
 
 
-def probe(path: Path) -> dict:
+def probe(path: Path, *, include_container_duration: bool = False) -> dict:
     try:
         result = subprocess.run(
             [os.environ.get("FFPROBE_BINARY", "ffprobe"), "-v", "error", *_INPUT_OPTIONS,
@@ -118,9 +118,14 @@ def probe(path: Path) -> dict:
         media_type = _RECORDING_TYPES[container["format_name"].split(",")[0]]
         if container.get("tags", {}).get("major_brand", "").strip() == "qt":
             media_type = "video/quicktime"
-        return {"duration": duration, "video_start": video_start,
-                "width": width, "height": height, "media_type": media_type,
-                "audio": any(s["codec_type"] == "audio" for s in streams)}
+        info = {
+            "duration": duration, "video_start": video_start,
+            "width": width, "height": height, "media_type": media_type,
+            "audio": any(s["codec_type"] == "audio" for s in streams),
+        }
+        if include_container_duration:
+            info["container_duration"] = _seconds(container.get("duration")) or duration
+        return info
     except FileNotFoundError as exc:
         raise HTTPException(503, "FFprobe is missing. Check the FFmpeg installation and restart the clipper.") from exc
     except (subprocess.SubprocessError, ValueError, KeyError, StopIteration, TypeError) as exc:

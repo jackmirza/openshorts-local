@@ -20,6 +20,8 @@ uploads/
 downloads/
 videos/
 output/
+/shorts-inbox/
+/shorts-ready/
 
 # OS / IDE
 .DS_Store

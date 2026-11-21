@@ -2260,7 +2260,7 @@ def score_batch_size():
     return 3 if llm_backend.active() else 8
 
 
-def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
+def get_viral_clips(transcript_result, video_duration, viewer_clips=None, *, shorts_preset=False):
     """Two-pass clip selection: score transcript windows, then detail the best.
 
     Windowing gives even coverage on long videos (a single call over the whole
@@ -2300,10 +2300,16 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
         # prompt keeps clips inside their candidate window), so scale them with
         # the requested band — a user asking for 60-90s clips on the default
         # 90s windows would get clips squeezed against the window walls.
-        min_secs, max_secs = clip_duration_bounds()
-        windows = build_transcript_windows(
-            transcript_result, video_duration,
-            window_seconds=max(90, int(max_secs * 1.5)))
+        if shorts_preset:
+            from clip_selection import SHORTS_MIN_SECONDS, SHORTS_MAX_SECONDS, shorts_scoring_windows
+            min_secs, max_secs = SHORTS_MIN_SECONDS, SHORTS_MAX_SECONDS
+            windows = shorts_scoring_windows(transcript_result, words, video_duration,
+                                             window_seconds=max(90, int(max_secs * 1.5)))
+        else:
+            min_secs, max_secs = clip_duration_bounds()
+            windows = build_transcript_windows(
+                transcript_result, video_duration,
+                window_seconds=max(90, int(max_secs * 1.5)))
         print(f"   Built {len(windows)} scoring window(s).")
         costs = []
 
@@ -2323,10 +2329,12 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
         if heat:
             print(f"   👀 Viewer clips fall in {len(heat)} window(s).")
 
-        def _payload(ws):
+        def _payload(ws, timed=False):
             out = []
             for w in ws:
                 item = {"id": w["id"], "start": w["start"], "end": w["end"], "text": w["text"]}
+                if timed:
+                    item["text"] = w["timed_text"]
                 h = heat.get(w["id"])
                 if h:
                     item["viewers_clipped"] = h["clips"]
@@ -2363,21 +2371,68 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
 
         # --- Pass 2: detailed clip extraction on the shortlist ---
         min_clips, max_clips = clip_count_targets(len(shortlist))
+        if shorts_preset:
+            capacity = int(video_duration // min_secs)
+            if not capacity:
+                return None
+            min_clips, max_clips = min(min_clips, capacity), min(max_clips, capacity)
 
-        def _detail_prompt_for(lo, hi):
+        def _detail_prompt_for(lo, hi, picked=()):
             # A split batch keeps the full clip-count band: a short list can
             # still hold the best clips, and the model returns fewer anyway.
             def build(ws):
-                return gemini_worker.DETAIL_PROMPT_TEMPLATE.format(
+                prompt = gemini_worker.DETAIL_PROMPT_TEMPLATE.format(
                     video_duration=video_duration, language=language,
                     min_clips=lo, max_clips=hi,
                     min_secs=min_secs, max_secs=max_secs,
-                    windows_json=json.dumps(_payload(ws), ensure_ascii=False))
+                    windows_json=json.dumps(_payload(ws, timed=shorts_preset), ensure_ascii=False))
+                if shorts_preset:
+                    instructions = (
+                        "Use the absolute [start–end] timestamps next to each line. "
+                        "Start with a strong complete sentence. Keep the setup and payoff of one event "
+                        "in the same clip, preferably in 32–43 seconds. "
+                        "End before the next topic begins. "
+                        "Clips must cover distinct parts of the recording and never overlap.\n")
+                    if picked:
+                        ranges = [[clip["start"], clip["end"]] for clip in picked]
+                        instructions += f"Find additional moments entirely outside these ranges: {ranges}.\n"
+                    prompt = prompt.replace("CLIP RULES:\n", "CLIP RULES:\n" + instructions, 1)
+                return prompt
             return build
+
+        def _snap(clips):
+            snapped = []
+            for clip in clips:
+                start, end = clip.get("start", 0), clip.get("end", 0)
+                if shorts_preset:
+                    window = by_id.get(clip.get("source_window_id"))
+                    if not window or not (0 <= start < end <= video_duration + 1):
+                        continue
+                    left = max(0, window["start"] - .075)
+                    right = min(video_duration, window["end"] + .075)
+                    if window["whole_section"]:
+                        ns, ne = left, right
+                    elif start < right and end > left:
+                        window_words = [w for w in words if left <= w["s"] and w["e"] <= right]
+                        ns, ne = snap_clip_to_words(max(start, left), min(end, right),
+                                                    window_words, right, min_secs, max_secs - .15)
+                        ns, ne = max(ns, left), min(ne, right)
+                    else:
+                        continue
+                else:
+                    ns, ne = snap_clip_to_words(start, end, words, video_duration, min_secs, max_secs)
+                if shorts_preset and not (0 <= ns < ne <= video_duration + .001
+                                           and min_secs <= round(ne - ns, 3) <= max_secs):
+                    continue
+                # Preserve the raw proposal for boundary-accuracy measurements.
+                snapped.append({**clip, "proposed": [start, end], "start": ns, "end": ne})
+            return snapped
 
         shorts = _run_stage_split(client, model_name, shortlist,
                                   _detail_prompt_for(min_clips, max_clips),
                                   gemini_worker.DetailResponse, "shorts", costs, "detail")
+        if shorts_preset:
+            shorts = dedupe_overlapping(_snap(shorts), ratio=0)
 
         # The floor lived only in the prompt, and a prompt is not a contract:
         # the model regularly returned half of it and the job shipped that.
@@ -2387,20 +2442,27 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
         # the honest answer for material that does not hold more.
         if len(shorts) < min_clips:
             used = {str(s.get("source_window_id") or "") for s in shorts}
-            spare = [w for w in shortlist if w["id"] not in used]
+            spare = shortlist if shorts_preset else [w for w in shortlist if w["id"] not in used]
             if spare:
                 missing = min_clips - len(shorts)
                 print(f"   Detail returned {len(shorts)} clip(s) of {min_clips}; "
-                      f"asking the {len(spare)} unused window(s) for {missing} more.")
+                      f"asking {len(spare)} window(s) for {missing} more.")
+                retry_limit = (max_clips - len(shorts) if shorts_preset
+                               else max(missing, len(spare)))
                 extra = _run_stage_split(
                     client, model_name, spare,
-                    _detail_prompt_for(missing, max(missing, len(spare))),
+                    _detail_prompt_for(missing, retry_limit, shorts),
                     gemini_worker.DetailResponse, "shorts", costs, "detail-floor")
+                if shorts_preset:
+                    extra = [c for c in _snap(extra) if all(
+                        c["end"] <= s["start"] or c["start"] >= s["end"] for s in shorts)]
                 if extra:
                     shorts = sorted(shorts + extra,
                                     key=lambda s: float(s.get("start") or 0))
                     print(f"   Recovered {len(extra)} clip(s) from them.")
 
+        if shorts_preset:
+            shorts = dedupe_overlapping(shorts, ratio=0)
         if len(shorts) > max_clips:
             # By score, never by position: the results arrive in transcript
             # order, so slicing kept the earliest clips and silently dropped
@@ -2409,20 +2471,13 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
             shorts = trim_to_best(shorts, max_clips)
             print(f"   Kept the {max_clips} best-scoring clip(s) of "
                   f"{max_clips + dropped}.")
-        # Snap each proposed clip onto real word boundaries (+ a bit of silence).
-        for s in shorts:
-            # Keep the model's raw proposal: it is how boundary accuracy is
-            # measured (distance to the nearest word before the snap; p90 was
-            # 0.4-0.5 s on 8 talks, 21-sep-2026, so the snap reaches it).
-            s["proposed"] = [s.get("start", 0), s.get("end", 0)]
-            ns, ne = snap_clip_to_words(s.get("start", 0), s.get("end", 0), words, video_duration,
-                                        min_duration=min_secs, max_duration=max_secs)
-            s["start"], s["end"] = ns, ne
-        deduped = dedupe_overlapping(shorts)
-        if len(deduped) < len(shorts):
-            print(f"   Dropped {len(shorts) - len(deduped)} clip(s) overlapping a "
-                  f"better-scored one.")
-            shorts = deduped
+        if not shorts_preset:
+            shorts = _snap(shorts)
+            deduped = dedupe_overlapping(shorts)
+            if len(deduped) < len(shorts):
+                print(f"   Dropped {len(shorts) - len(deduped)} clip(s) overlapping a "
+                      f"better-scored one.")
+                shorts = deduped
 
         # Aggregate cost across both passes.
         cost_analysis = None
@@ -2706,9 +2761,11 @@ if __name__ == '__main__':
     parser.add_argument('--prepare-only', action='store_true',
                         help="Fetch the source (download, cut to the paid minutes), print "
                              "SOURCE_READY <path> and exit: a remote worker renders it.")
+    parser.add_argument('--local-shorts', action='store_true',
+                        help="Select distinct 30–45 second clips from a local inbox recording.")
 
     args = parser.parse_args()
-    output_format = args.format
+    output_format = "vertical" if args.local_shorts else args.format
 
     script_start_time = time.time()
 
@@ -2940,11 +2997,16 @@ if __name__ == '__main__':
         render_clip(input_video, output_file, output_format)
     else:
         # Get duration (needed by both the transcript and the vision path).
-        cap = cv2.VideoCapture(input_video)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        duration = frame_count / fps
-        cap.release()
+        if args.local_shorts:
+            from pathlib import Path
+            from local_clips import probe
+            duration = probe(Path(input_video))["duration"]
+        else:
+            cap = cv2.VideoCapture(input_video)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            duration = frame_count / fps
+            cap.release()
 
         # 3. Transcribe — unless the video has no audio, in which case fall back
         # to Gemini vision (picks clips from the imagery instead of the speech).
@@ -3015,7 +3077,14 @@ if __name__ == '__main__':
             print("♻️ Using the clips Gemini picked while the video downloaded.")
             clips_data = early_clips
         elif transcript is not None:
-            clips_data = get_viral_clips(transcript, duration, viewer_clips=viewer_clips)
+            clips_data = get_viral_clips(transcript, duration, viewer_clips=viewer_clips,
+                                         shorts_preset=args.local_shorts)
+        elif args.local_shorts:
+            from local_motion import motion_highlights
+            shorts = motion_highlights(input_video, duration)
+            if not shorts:
+                raise RuntimeError("No distinct 30–45 second activity highlights found in this recording.")
+            clips_data = {"shorts": shorts}
         else:
             clips_data = get_visual_clips(input_video, duration, viewer_clips=viewer_clips)
 

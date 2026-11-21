@@ -8,7 +8,7 @@ if (Get-ClippingListeners) {
 $clipRepo = Split-Path -Parent $PSScriptRoot
 Push-Location -LiteralPath $clipRepo
 try {
-    foreach ($clipFolder in @('output', 'uploads', 'local-data')) {
+    foreach ($clipFolder in @('output', 'uploads', 'local-data', 'shorts-inbox', 'shorts-ready')) {
         New-Item -ItemType Directory -Path (Join-Path $clipRepo $clipFolder) -Force | Out-Null
     }
     & docker info --format '{{.ServerVersion}}' | Out-Null
@@ -54,6 +54,8 @@ try {
     if (-not $clipReady) { throw 'The dashboard is not ready. Check docker compose -f compose.local.yml logs frontend backend.' }
     Write-Host 'Gameplay clipper: http://localhost:5175/local-clips'
     Write-Host 'OpenShorts dashboard: http://localhost:5175'
+    Write-Host "Shorts inbox  $(Join-Path $clipRepo 'shorts-inbox')"
+    Write-Host "Ready Shorts  $(Join-Path $clipRepo 'shorts-ready')"
 } finally {
     Pop-Location
 }

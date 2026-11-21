@@ -46,6 +46,8 @@ local-data/
 .local-checks/
 uploads/
 output/
+shorts-inbox/
+shorts-ready/
 
 # Secrets — never bake real credentials into the image (repo is public,
 # image may be pushed to a registry). Runtime env comes via compose env_file.
