@@ -91,12 +91,13 @@ across builds.
    file to stabilize, then queues it once and finishes one inbox job at a time.
 3. Open `shorts-ready/` to review both versions of each 30–45 second highlight.
    The source folder has `vertical/` MP4s for YouTube Shorts and Facebook Reels
-   and `horizontal/` MP4s for standard YouTube uploads and landscape Facebook
-   videos. The horizontal export fits the full source frame inside 1920×1080.
+   at 1080×1920 and `horizontal/` MP4s for standard YouTube uploads and landscape
+   Facebook videos. The horizontal export fits the full source frame inside 1920×1080.
    Matching filenames identify the same moment in each orientation.
    `clips.json` lists both files, original time ranges, suggested titles and
-   selection reasons. See `jobs.json` for progress and the count in each
-   orientation. The original stays in the inbox.
+   selection reasons. See `jobs.json` for progress, the count in each orientation
+   and the number of complete pairs. A `partial` result includes the playable
+   exports. The original stays in the inbox.
 
 Whisper aligns clip boundaries and captions to the speech. Ollama scores
 spoken sections for their opening hook, standalone context and payoff. With

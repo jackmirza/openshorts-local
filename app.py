@@ -2484,6 +2484,10 @@ def _resume_candidates(held: set, now: float):
             write_json_atomic(manifest_path, m)
         except Exception:
             pass
+        # Retire the old worker's claim before this job enters the queue.
+        # Keep its rendered files when only delivery was interrupted.
+        remote_worker.clear(os.path.dirname(manifest_path),
+                            purge=m.get("stage") != _DELIVERY_STAGE)
         picked.append((job_id, m))
     return keep_reservations, picked
 
@@ -2550,10 +2554,6 @@ def _register_resumed(picked) -> int:
             env.pop("DOWNLOAD_SKIP_STATICS", None)
 
         priority = int(m.get("priority", 2))
-        # Whatever a remote worker was doing for the instance that held this
-        # job is void now: its next call is refused and it drops the job. A
-        # job cut during its delivery keeps the clips it is delivering.
-        remote_worker.clear(job_path, purge=m.get("stage") != _DELIVERY_STAGE)
         jobs[job_id] = {
             'status': 'queued',
             'logs': _TimedLog([f"♻️ Resuming your video after a server update (attempt {attempts})."]),
@@ -2596,9 +2596,8 @@ def _register_resumed(picked) -> int:
 def _resume_interrupted_jobs() -> set:
     """Re-enqueue jobs that were mid-processing when the server last stopped.
 
-    Runs after _recover_jobs_from_disk: a job whose clips already finished has a
-    metadata JSON and is recovered as 'completed', so we only resume manifests
-    with no metadata yet (analysis never finished). Also called periodically
+    Runs after _recover_jobs_from_disk. A manifest can survive with metadata
+    when a job stops after analysis or while rendering. Also called periodically
     (_resume_scan, through ``_resume_interrupted_jobs_async``): a manifest
     another instance is heartbeating is left alone until that heartbeat goes
     stale, and a job this instance already holds is never enqueued twice.

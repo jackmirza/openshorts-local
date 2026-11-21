@@ -7,6 +7,7 @@ import asyncio
 import itertools
 import json
 import os
+import threading
 import time
 from types import SimpleNamespace
 
@@ -908,6 +909,14 @@ class TestVolume:
             time.sleep(0.5)          # a slow shared disk listing + reads
             return names
         monkeypatch.setattr(app_module, "_manifest_names", slow_names)
+        loop_thread = threading.get_ident()
+        clear = app_module.remote_worker.clear
+
+        def clear_on_worker(job_dir, purge=False):
+            assert threading.get_ident() != loop_thread
+            clear(job_dir, purge=purge)
+
+        monkeypatch.setattr(app_module.remote_worker, "clear", clear_on_worker)
         worst, keep = _worst_stall(app_module._resume_interrupted_jobs_async)
         assert len(keep) == 800 and app_module.job_queue.qsize() == 800
         assert worst < 0.15, f"loop held {worst * 1000:.0f} ms"

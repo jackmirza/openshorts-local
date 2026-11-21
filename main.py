@@ -36,7 +36,7 @@ from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, dedupe_overlapping,
                             score_batches, shortlist_target,
                             snap_clip_to_words, trim_to_best,
-                            vision_segments)
+                            vision_segments, SHORTS_HORIZONTAL_SIZE, SHORTS_VERTICAL_SIZE)
 from ffmpeg_utils import (video_encode_args, audio_encode_args, cut_clip, QUALITY,
                           QUALITY_FAST, METADATA_SCRUB)
 from dotenv import load_dotenv
@@ -1468,12 +1468,13 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end, split_ranges=
 
 def render_inbox_horizontal(cut_path, output_path, transcript, start, end):
     """Fit the original cut inside 1080p landscape and add its speech captions."""
-    width = "max(2,min(1920,trunc(1080*dar/2)*2))"
-    height = "max(2,min(1080,trunc(1920/dar/2)*2))"
+    width, height = SHORTS_HORIZONTAL_SIZE
+    fit_width = f"max(2,min({width},trunc({height}*dar/2)*2))"
+    fit_height = f"max(2,min({height},trunc({width}/dar/2)*2))"
     filters = [
-        f"scale=w='{width}':h='{height}'",
+        f"scale=w='{fit_width}':h='{fit_height}'",
         "setsar=1",
-        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
     ]
     captions = auto_caption_clip(output_path, transcript, start, end,
                                  split_ranges=(), plan_only=True)
@@ -1653,7 +1654,7 @@ def trim_subtitle_band(input_video, band):
 
 def render_clip(input_video, final_output_video, output_format="auto",
                 force_strategy=None, crop_overrides=None, watermark=False,
-                subtitle_band=None):
+                subtitle_band=None, output_size=None):
     """Route a cut clip through the right renderer for the chosen output format.
     vertical/auto -> 9:16 reframe, square -> 1:1 reframe, horizontal -> keep.
     ``force_strategy`` (e.g. 'WIDE'/'TRACK') pins every scene's layout — the
@@ -1665,18 +1666,19 @@ def render_clip(input_video, final_output_video, output_format="auto",
     ``subtitle_band`` (the job metadata's ``source_subtitle_band``) trims the
     source's own burned-in subtitles off the bottom first, so our captions are
     the only text layer. Every render from the source passes it: the job, the
-    recut and the editor's re-render."""
+    recut and the editor's re-render.
+    ``output_size`` fixes the reframe canvas for inbox exports."""
     trimmed = trim_subtitle_band(input_video, subtitle_band)
     try:
         return _render_clip(trimmed, final_output_video, output_format,
-                            force_strategy, crop_overrides, watermark)
+                            force_strategy, crop_overrides, watermark, output_size)
     finally:
         if trimmed != input_video and os.path.exists(trimmed):
             os.remove(trimmed)
 
 
 def _render_clip(input_video, final_output_video, output_format,
-                 force_strategy, crop_overrides, watermark):
+                 force_strategy, crop_overrides, watermark, output_size):
     if output_format == "horizontal":
         ok = finalize_clip_passthrough(input_video, final_output_video)
         if ok and watermark:
@@ -1686,7 +1688,7 @@ def _render_clip(input_video, final_output_video, output_format,
     return process_video_to_vertical(input_video, final_output_video, aspect_ratio=aspect,
                                      force_strategy=force_strategy,
                                      crop_overrides=crop_overrides,
-                                     watermark=watermark)
+                                     watermark=watermark, output_size=output_size)
 
 
 # Watermark geometry, as fractions of the clip width/height.
@@ -1801,7 +1803,8 @@ def mark_delivery(final_path, marker=None):
 
 
 def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPECT_RATIO,
-                              force_strategy=None, crop_overrides=None, watermark=False):
+                              force_strategy=None, crop_overrides=None, watermark=False,
+                              output_size=None):
     """
     Core logic to reframe a horizontal video to a target aspect ratio using
     scene detection and Active Speaker Tracking (MediaPipe).
@@ -1819,7 +1822,7 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
             result = reframe_v2.render(input_video, final_output_video, aspect_ratio,
                                        force_strategy=force_strategy,
                                        crop_overrides=crop_overrides,
-                                       watermark=watermark)
+                                       watermark=watermark, output_size=output_size)
             print(f"   ⏱️ Reframe v2 total: {time.time() - t0:.1f}s")
             return result
         except Exception as e:
@@ -1867,8 +1870,8 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
     # the user posts, so it must not ship sub-HD. The frame loop below already
     # resizes every cropped frame to these dims, so nothing else changes.
     from reframe_v2 import delivery_size
-    OUTPUT_WIDTH, OUTPUT_HEIGHT = delivery_size(original_width, original_height,
-                                                aspect_ratio)
+    OUTPUT_WIDTH, OUTPUT_HEIGHT = output_size or delivery_size(
+        original_width, original_height, aspect_ratio)
 
     # Initialize Cameraman
     cameraman = SmoothedCameraman(OUTPUT_WIDTH, OUTPUT_HEIGHT, original_width, original_height, aspect_ratio=aspect_ratio)
@@ -3172,7 +3175,8 @@ if __name__ == '__main__':
                     # made. Each worker writes only its own clip dict, so the
                     # re-dump after the pool is race-free.
                     success = render_clip(clip_temp_path, clip_final_path, output_format,
-                                          subtitle_band=source_subtitle_band)
+                                          subtitle_band=source_subtitle_band,
+                                          output_size=SHORTS_VERTICAL_SIZE if args.local_shorts else None)
                     if success:
                         print(f"   🎞️ Clip {i+1} framed")
                     deliver_path = clip_final_path

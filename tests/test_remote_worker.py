@@ -710,7 +710,7 @@ def test_resuming_a_job_voids_its_remote_claim(api):
     job_id, d = _queued(m, enqueue=False)
     del m.jobs[job_id]
     claim = rw.begin(d, "w1")
-    m._register_resumed([(job_id, json.load(open(os.path.join(d, m._RESUME_FILE))))])
+    asyncio.run(m._resume_interrupted_jobs_async())
     assert m.jobs[job_id]["status"] == "queued"
     assert rw.valid(d, claim) is None
 

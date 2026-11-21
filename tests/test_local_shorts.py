@@ -48,10 +48,13 @@ def test_reuses_a_submitted_job_after_restart_and_exports_playable_clips(inbox, 
 
     def probe(path, *, include_container_duration=False):
         if path.parent == inbox.inbox:
-            return {"duration": 110, "video_start": 0}
+            return {"duration": 140, "video_start": 0}
         assert include_container_duration
         duration = 20 if path.name == "too-short.mp4" else 40
-        width, height = (1920, 1080) if path.name == "horizontal.mp4" else (1080, 1920)
+        width, height = {
+            "horizontal.mp4": (1920, 1080),
+            "rounded-portrait.mp4": (1216, 2160),
+        }.get(path.name, (1080, 1920))
         return {"duration": duration, "container_duration": duration,
                 "video_start": 0, "width": width, "height": height}
 
@@ -102,26 +105,33 @@ def test_reuses_a_submitted_job_after_restart_and_exports_playable_clips(inbox, 
             job_folder.mkdir()
             (job_folder / "captioned.mp4").write_bytes(b"captioned")
             (job_folder / "horizontal.mp4").write_bytes(b"full frame")
+            (job_folder / "rounded-portrait.mp4").write_bytes(b"wrong ratio")
             (job_folder / "too-short.mp4").write_bytes(b"short")
             jobs[job_id] = {"status": "completed", "result": {"clips": [
                 {"video_url": f"/videos/{job_id}/captioned.mp4", "start": 10, "end": 50,
                  "horizontal_file": "horizontal.mp4"},
-                {"video_url": f"/videos/{job_id}/too-short.mp4", "start": 70, "end": 90},
+                {"video_url": f"/videos/{job_id}/rounded-portrait.mp4", "start": 52, "end": 92,
+                 "horizontal_file": "horizontal.mp4"},
+                {"video_url": f"/videos/{job_id}/too-short.mp4", "start": 94, "end": 114},
             ]}}
             await restarted._tick(app, client, str)
             await restarted._tick(app, client, str)
             assert submissions == [job_id]
             record = restarted.jobs[job_id]
             assert (record["status"], record["clips"], record["horizontal_clips"],
-                    record["skipped"]) == ("completed", 1, 1, 1)
+                    record["paired_clips"], record["skipped"]) == ("partial", 1, 2, 1, 1)
             folder = inbox.ready / record["folder"]
             assert (folder / "vertical" / "short-01.mp4").read_bytes() == b"captioned"
             assert (folder / "horizontal" / "short-01.mp4").read_bytes() == b"full frame"
-            (clip,) = json.loads((folder / "clips.json").read_text())
+            assert (folder / "horizontal" / "short-02.mp4").read_bytes() == b"full frame"
+            assert not (folder / "vertical" / "short-02.mp4").exists()
+            clip, horizontal_only = json.loads((folder / "clips.json").read_text())
             assert (clip["start"], clip["end"], clip["duration"]) == (10, 50, 40)
             assert clip["file"] == "vertical/short-01.mp4"
             assert clip["horizontal_file"] == "horizontal/short-01.mp4"
             assert clip["horizontal_duration"] == 40
+            assert horizontal_only["horizontal_file"] == "horizontal/short-02.mp4"
+            assert "file" not in horizontal_only
             assert original.read_bytes() == b"download"
 
     asyncio.run(exercise())

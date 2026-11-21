@@ -640,7 +640,7 @@ def encode_scenes(input_video, specs, orig_w, orig_h, out_w, out_h, fps,
 
 
 def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
-           force_strategy=None, crop_overrides=None, watermark=False):
+           force_strategy=None, crop_overrides=None, watermark=False, output_size=None):
     """Full v2 reframe of one clip. Raises on failure (caller falls back).
 
     ``content_ranges`` pins which stretches (in this clip's timeline) show a
@@ -670,7 +670,7 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
     fps = float(fps)  # PySceneDetect can hand back a Fraction
     orig_w, orig_h = m.get_video_resolution(input_video)
 
-    out_w, out_h = delivery_size(orig_w, orig_h, aspect_ratio)
+    out_w, out_h = output_size or delivery_size(orig_w, orig_h, aspect_ratio)
 
     if not scenes:
         import cv2

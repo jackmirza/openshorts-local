@@ -8,6 +8,8 @@ import math
 
 SHORTS_MIN_SECONDS = 30.0
 SHORTS_MAX_SECONDS = 45.0
+SHORTS_VERTICAL_SIZE = (1080, 1920)
+SHORTS_HORIZONTAL_SIZE = (1920, 1080)
 
 # USD per 1M tokens (input, output incl. thinking), from ai.google.dev pricing.
 MODEL_PRICES = {

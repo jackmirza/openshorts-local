@@ -15,7 +15,8 @@ import uuid
 import httpx
 from fastapi import HTTPException
 
-from clip_selection import SHORTS_MAX_SECONDS, SHORTS_MIN_SECONDS
+from clip_selection import (SHORTS_HORIZONTAL_SIZE, SHORTS_MAX_SECONDS,
+                            SHORTS_MIN_SECONDS, SHORTS_VERTICAL_SIZE)
 from jsonfile import write_json_atomic
 from local_clips import probe
 
@@ -155,24 +156,11 @@ class ShortsInbox:
         stem = re.sub(r"[^a-zA-Z0-9_-]+", "-", Path(entry["source"]).stem).strip("-_")
         folder = f"{stem[:60] or 'recording'}-{job_id[:12]}"
         export_dir = self.ready / folder
+        job_dir = self.output / job_id
         records = []
-        skipped = 0
-        horizontal_clips = 0
         for index, clip in enumerate(clips, 1):
-            # Copy the exact local file served by status (captioned if present).
-            parts = unquote(urlsplit(clip["video_url"]).path).split("/")
-            if (len(parts) != 4 or parts[:3] != ["", "videos", job_id]
-                    or "\\" in parts[-1] or not parts[-1].endswith(".mp4")):
-                raise ValueError("Unexpected clip path in the job result.")
-            job_dir = self.output / job_id
             filename = f"short-{index:02d}.mp4"
-            vertical = f"vertical/{filename}"
-            duration = _copy_render(job_dir / parts[-1], export_dir / vertical, (9, 16))
-            if duration is None:
-                skipped += 1
-                continue
             record = {
-                "file": vertical, "duration": duration,
                 "start": clip["start"], "end": clip["end"],
                 "title": clip.get("video_title_for_youtube_short"),
                 "hook": clip.get("viral_hook_text"),
@@ -180,20 +168,35 @@ class ShortsInbox:
                 "score": clip.get("predicted_score"),
                 "method": clip.get("selection_method", "transcript"),
             }
+            # Copy the exact local file served by status (captioned if present).
+            parts = unquote(urlsplit(clip.get("video_url") or "").path).split("/")
+            if (len(parts) == 4 and parts[:3] == ["", "videos", job_id]
+                    and "\\" not in parts[-1] and parts[-1].endswith(".mp4")):
+                vertical = f"vertical/{filename}"
+                duration = _copy_render(job_dir / parts[-1], export_dir / vertical,
+                                        SHORTS_VERTICAL_SIZE)
+                if duration is not None:
+                    record.update(file=vertical, duration=duration)
             wide_source = clip.get("horizontal_file")
-            if (wide_source and wide_source.endswith(".mp4")
+            if (isinstance(wide_source, str) and wide_source.endswith(".mp4")
                     and "/" not in wide_source and "\\" not in wide_source):
                 horizontal = f"horizontal/{filename}"
-                wide_seconds = _copy_render(job_dir / wide_source, export_dir / horizontal, (16, 9))
+                wide_seconds = _copy_render(job_dir / wide_source, export_dir / horizontal,
+                                            SHORTS_HORIZONTAL_SIZE)
                 if wide_seconds is not None:
                     record.update(horizontal_file=horizontal, horizontal_duration=wide_seconds)
-                    horizontal_clips += 1
-            records.append(record)
+            if "file" in record or "horizontal_file" in record:
+                records.append(record)
         if not records:
-            raise ValueError("No playable vertical clips between 30 and 45 seconds were rendered.")
+            raise ValueError("No playable clips between 30 and 45 seconds were rendered.")
         write_json_atomic(export_dir / "clips.json", records, indent=2)
-        return {"folder": folder, "clips": len(records), "horizontal_clips": horizontal_clips,
-                "skipped": skipped}
+        paired = sum("file" in clip and "horizontal_file" in clip for clip in records)
+        return {
+            "folder": folder, "status": "completed" if paired == len(clips) else "partial",
+            "clips": sum("file" in clip for clip in records),
+            "horizontal_clips": sum("horizontal_file" in clip for clip in records),
+            "paired_clips": paired, "skipped": len(clips) - len(records),
+        }
 
     async def _tick(self, app, client, job_error):
         active = next((key for key, job in self.jobs.items() if job["status"] in _ACTIVE), None)
@@ -216,7 +219,7 @@ class ShortsInbox:
             job = response.raise_for_status().json()
             if job["status"] == "completed":
                 exported = await asyncio.to_thread(self._export, active, entry, job["result"]["clips"])
-                await self._record(active, status="completed", **exported)
+                await self._record(active, **exported)
             elif job["status"] == "failed":
                 await self._record(active, status="failed", error=job_error(job["logs"])[-500:])
             elif job["status"] != entry["status"]:
