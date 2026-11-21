@@ -1466,6 +1466,35 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end, split_ranges=
         return None
 
 
+def render_inbox_horizontal(cut_path, output_path, transcript, start, end):
+    """Fit the original cut inside 1080p landscape and add its speech captions."""
+    width = "max(2,min(1920,trunc(1080*dar/2)*2))"
+    height = "max(2,min(1080,trunc(1920/dar/2)*2))"
+    filters = [
+        f"scale=w='{width}':h='{height}'",
+        "setsar=1",
+        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
+    ]
+    captions = auto_caption_clip(output_path, transcript, start, end,
+                                 split_ranges=(), plan_only=True)
+    if captions:
+        filters.append(captions[0])
+    scratch = output_path + ".tmp.mp4"
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-i", cut_path,
+             "-map", "0:V:0", "-map", "0:a:0?", "-vf", ",".join(filters),
+             *video_encode_args(QUALITY), "-c:a", "copy", *METADATA_SCRUB,
+             "-movflags", "+faststart", scratch],
+            capture_output=True, text=True, errors="replace", timeout=1800)
+        if result.returncode:
+            raise RuntimeError(f"Horizontal render failed: {result.stderr[-1000:].strip()}")
+        os.replace(scratch, output_path)
+    finally:
+        if os.path.exists(scratch):
+            os.remove(scratch)
+
+
 def auto_hook_clip(clip_path, clip, captions=None, mark=False):
     """Burn the clip's Gemini hook text as a DERIVED file (AUTO_HOOK=1).
 
@@ -2762,7 +2791,7 @@ if __name__ == '__main__':
                         help="Fetch the source (download, cut to the paid minutes), print "
                              "SOURCE_READY <path> and exit: a remote worker renders it.")
     parser.add_argument('--local-shorts', action='store_true',
-                        help="Select distinct 30–45 second clips from a local inbox recording.")
+                        help="Select distinct 30–45 second clips and render both orientations.")
 
     args = parser.parse_args()
     output_format = "vertical" if args.local_shorts else args.format
@@ -3201,6 +3230,12 @@ if __name__ == '__main__':
                         # hook, captions) so the file is complete when it is
                         # announced, never one that ffmpeg is still writing.
                         print(f"CLIP_READY {i} {os.path.basename(served)}")
+                        if args.local_shorts:
+                            horizontal = os.path.join(output_dir, f"horizontal_clip_{i+1:02d}.mp4")
+                            render_inbox_horizontal(clip_temp_path, horizontal, transcript, start, end)
+                            if os.environ.get("WATERMARK") == "1":
+                                horizontal = mark_delivery(horizontal)
+                            clip["horizontal_file"] = os.path.basename(horizontal)
                     return success
                 finally:
                     if os.path.exists(clip_temp_path):
@@ -3248,8 +3283,8 @@ if __name__ == '__main__':
 
             # Persist per-clip render results added by the workers (auto_hook)
             # so the editor can see what is already burned into each clip.
-            if any('auto_hook' in c or 'hook_grounding' in c or 'pro_suggested' in c
-                   for c in shorts):
+            if args.local_shorts or any('auto_hook' in c or 'hook_grounding' in c
+                                        or 'pro_suggested' in c for c in shorts):
                 # Atomic: the dashboard is already reading this file for the
                 # clips announced above (CLIP_READY).
                 write_json_atomic(metadata_file, clips_data, indent=2)

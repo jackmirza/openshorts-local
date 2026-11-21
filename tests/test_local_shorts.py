@@ -50,9 +50,10 @@ def test_reuses_a_submitted_job_after_restart_and_exports_playable_clips(inbox, 
         if path.parent == inbox.inbox:
             return {"duration": 110, "video_start": 0}
         assert include_container_duration
-        duration = 40 if path.name == "captioned.mp4" else 20
+        duration = 20 if path.name == "too-short.mp4" else 40
+        width, height = (1920, 1080) if path.name == "horizontal.mp4" else (1080, 1920)
         return {"duration": duration, "container_duration": duration,
-                "video_start": 0, "width": 1080, "height": 1920}
+                "video_start": 0, "width": width, "height": height}
 
     monkeypatch.setattr(local_shorts, "probe", probe)
     original = inbox.inbox / "match.mp4"
@@ -100,20 +101,27 @@ def test_reuses_a_submitted_job_after_restart_and_exports_playable_clips(inbox, 
             job_folder = inbox.output / job_id
             job_folder.mkdir()
             (job_folder / "captioned.mp4").write_bytes(b"captioned")
+            (job_folder / "horizontal.mp4").write_bytes(b"full frame")
             (job_folder / "too-short.mp4").write_bytes(b"short")
             jobs[job_id] = {"status": "completed", "result": {"clips": [
-                {"video_url": f"/videos/{job_id}/captioned.mp4", "start": 10, "end": 50},
+                {"video_url": f"/videos/{job_id}/captioned.mp4", "start": 10, "end": 50,
+                 "horizontal_file": "horizontal.mp4"},
                 {"video_url": f"/videos/{job_id}/too-short.mp4", "start": 70, "end": 90},
             ]}}
             await restarted._tick(app, client, str)
             await restarted._tick(app, client, str)
             assert submissions == [job_id]
             record = restarted.jobs[job_id]
-            assert (record["status"], record["clips"], record["skipped"]) == ("completed", 1, 1)
+            assert (record["status"], record["clips"], record["horizontal_clips"],
+                    record["skipped"]) == ("completed", 1, 1, 1)
             folder = inbox.ready / record["folder"]
-            assert (folder / "short-01.mp4").read_bytes() == b"captioned"
+            assert (folder / "vertical" / "short-01.mp4").read_bytes() == b"captioned"
+            assert (folder / "horizontal" / "short-01.mp4").read_bytes() == b"full frame"
             (clip,) = json.loads((folder / "clips.json").read_text())
             assert (clip["start"], clip["end"], clip["duration"]) == (10, 50, 40)
+            assert clip["file"] == "vertical/short-01.mp4"
+            assert clip["horizontal_file"] == "horizontal/short-01.mp4"
+            assert clip["horizontal_duration"] == 40
             assert original.read_bytes() == b"download"
 
     asyncio.run(exercise())

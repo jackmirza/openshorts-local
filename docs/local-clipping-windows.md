@@ -89,12 +89,16 @@ across builds.
    The inbox accepts MP4, MKV, WebM, MOV and other common video files up to 2 GB.
 2. Keep Docker Desktop and the local stack running. The watcher waits for a
    file to stabilize, then queues it once and finishes one inbox job at a time.
-3. Open `shorts-ready/` to review the finished 30–45 second vertical MP4s.
-   Each source gets a folder and a `clips.json` file with the original time
-   ranges, suggested titles and selection reasons. See `jobs.json` for progress
-   and any processing errors. The original stays in the inbox.
+3. Open `shorts-ready/` to review both versions of each 30–45 second highlight.
+   The source folder has `vertical/` MP4s for YouTube Shorts and Facebook Reels
+   and `horizontal/` MP4s for standard YouTube uploads and landscape Facebook
+   videos. The horizontal export fits the full source frame inside 1920×1080.
+   Matching filenames identify the same moment in each orientation.
+   `clips.json` lists both files, original time ranges, suggested titles and
+   selection reasons. See `jobs.json` for progress and the count in each
+   orientation. The original stays in the inbox.
 
-Whisper supplies word timings for captions and clip boundaries. Ollama scores
+Whisper aligns clip boundaries and captions to the speech. Ollama scores
 spoken sections for their opening hook, standalone context and payoff. With
 little or no speech, the picker uses frame-to-frame activity to propose
 gameplay highlights.
