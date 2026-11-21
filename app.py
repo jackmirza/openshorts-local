@@ -1533,7 +1533,7 @@ def _canonical_clip_file(output_dir, base_name, index):
     return os.path.basename(max(derived, key=os.path.getmtime))
 
 
-def _clips_actually_rendered(job_id, output_dir, base_name, clips):
+def _clips_actually_rendered(job_id, output_dir, base_name, clips, *, inbox=False):
     """Keep only the clips whose file is really on disk. Returns (kept, missing).
 
     The metadata JSON is written BEFORE any clip renders, and main.py's worker
@@ -1561,16 +1561,23 @@ def _clips_actually_rendered(job_id, output_dir, base_name, clips):
     ready_files = (jobs.get(job_id) or {}).get('ready_files') or {}
     kept = []
     for i, clip in enumerate(clips):
-        clip_filename = (ready_files.get(i)
-                         or _canonical_clip_file(output_dir, base_name, i))
-        clip_path = os.path.join(output_dir, clip_filename)
-        try:
-            present = os.path.getsize(clip_path) > 0
-        except OSError:
-            present = False
-        if not present:
-            print(f"⚠️  Clip {i + 1} of {job_id} never rendered "
-                  f"({clip_filename}) — dropping it from the result.")
+        if inbox:
+            # These names are recorded after an orientation has finished.
+            # A half-written canonical file must not hide a good wide export.
+            candidates = (clip.get("vertical_file"), clip.get("horizontal_file"))
+        else:
+            candidates = (ready_files.get(i) or _canonical_clip_file(output_dir, base_name, i),)
+        for clip_filename in candidates:
+            if (not isinstance(clip_filename, str) or not clip_filename.endswith(".mp4")
+                    or "/" in clip_filename or "\\" in clip_filename):
+                continue
+            try:
+                if os.path.getsize(os.path.join(output_dir, clip_filename)) > 0:
+                    break
+            except OSError:
+                pass
+        else:
+            print(f"⚠️  Clip {i + 1} of {job_id} never rendered — dropping it from the result.")
             continue
         clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
         kept.append(clip)
@@ -1882,11 +1889,20 @@ def _recover_jobs_from_disk():
                 data = json.load(f)
             base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
             clips = data.get('shorts', [])
-            for i, clip in enumerate(clips):
-                if not clip.get('video_url'):
-                    clip['video_url'] = (
-                        f"/videos/{job_id}/"
-                        f"{_canonical_clip_file(job_path, base_name, i)}")
+            inbox = not BILLING_ENABLED and data.get("local_shorts") is True
+            selected = len(clips)
+            if inbox:
+                clips, _ = _clips_actually_rendered(job_id, job_path, base_name, clips, inbox=True)
+            else:
+                for i, clip in enumerate(clips):
+                    if not clip.get('video_url'):
+                        clip['video_url'] = (
+                            f"/videos/{job_id}/"
+                            f"{_canonical_clip_file(job_path, base_name, i)}")
+            result = {'clips': clips, 'cost_analysis': data.get('cost_analysis')}
+            if inbox:
+                result["selected_clips"] = selected
+            empty_inbox_job = inbox and not clips
             owner = None
             owner_path = os.path.join(job_path, ".owner")
             if os.path.exists(owner_path):
@@ -1894,11 +1910,12 @@ def _recover_jobs_from_disk():
                     raw = f.read().strip()
                 owner = int(raw) if raw.isdigit() else (raw or None)
             jobs[job_id] = {
-                'status': 'completed',
-                'logs': _TimedLog(["♻️ Job recovered from disk after server restart."]),
+                'status': 'failed' if empty_inbox_job else 'completed',
+                'logs': _TimedLog(["No clips could be rendered from this video." if empty_inbox_job
+                                   else "♻️ Job recovered from disk after server restart."]),
                 'output_dir': job_path,
                 'user_id': owner,
-                'result': {'clips': clips, 'cost_analysis': data.get('cost_analysis')},
+                'result': result,
             }
             recovered += 1
         except Exception as e:
@@ -5123,9 +5140,10 @@ def _finish_job(job_id, returncode, output_dir):
             base_name = os.path.basename(target_json).replace('_metadata.json', '')
             clips = data.get('shorts', [])
             cost_analysis = data.get('cost_analysis')
+            inbox = not BILLING_ENABLED and data.get("local_shorts") is True
 
             rendered, missing = _clips_actually_rendered(
-                job_id, output_dir, base_name, clips)
+                job_id, output_dir, base_name, clips, inbox=inbox)
             if not rendered:
                 # Nothing to hand over: fail the job so _settle_reservation
                 # releases the minutes instead of committing them.
@@ -5137,6 +5155,8 @@ def _finish_job(job_id, returncode, output_dir):
                     jobs[job_id]['logs'].append(
                         f"⚠️ {missing} of {len(clips)} clips failed to render.")
                 jobs[job_id]['result'] = {'clips': rendered, 'cost_analysis': cost_analysis}
+                if inbox:
+                    jobs[job_id]['result']['selected_clips'] = len(clips)
         else:
             jobs[job_id]['status'] = 'failed'
             jobs[job_id]['logs'].append("No metadata file generated.")

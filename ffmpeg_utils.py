@@ -422,28 +422,29 @@ def _gpu_cut_ok(input_video):
 _source_rates = {}
 
 
-def _source_rate(path):
-    """Average frame rate of the first video stream as a Fraction, or None."""
-    if path in _source_rates:
-        return _source_rates[path]
+def _source_rate(path, *, nominal=False):
+    """Frame rate of the first video stream as a Fraction, or None."""
+    field = "r_frame_rate" if nominal else "avg_frame_rate"
+    key = (path, field)
+    if key in _source_rates:
+        return _source_rates[key]
     rate = None
     try:
         out = subprocess.check_output(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=avg_frame_rate", "-of", "csv=p=0", path],
+             "-show_entries", f"stream={field}", "-of", "csv=p=0", path],
             stderr=subprocess.DEVNULL, timeout=60, text=True).strip()
         num, _, den = out.partition("/")
         value = Fraction(int(num), int(den or 1))
         rate = value if value > 0 else None
     except Exception:
         rate = None
-    _source_rates[path] = rate
+    _source_rates[key] = rate
     return rate
 
 
-def cut_rate_filter(input_video):
-    """``["-vf", "fps=N/D"]`` when the job caps its frame rate and the source
-    is well above the cap, else ``[]``.
+def cut_rate_filter(input_video, *, constant_rate=False):
+    """Choose an FFmpeg frame rate filter for the common source cut.
 
     The cut is the file every later pass reads (tracking, scene detection, the
     reframe render, captions, hook, watermark), so a 60 fps source cut at 30
@@ -453,11 +454,19 @@ def cut_rate_filter(input_video):
     kept frame is evenly spaced and motion stays smooth. A source under 1.5x
     the cap (a 40 fps one) is left alone: halving it would cost more
     smoothness than it saves.
+
+    Inbox exports use a constant rate so the last packet has the same
+    duration in both orientations, including on variable-rate footage.
     """
     try:
         cap = float(os.environ.get("CUT_MAX_FPS", "0") or 0)
     except ValueError:
         cap = 0
+    if constant_rate:
+        rate = _source_rate(input_video, nominal=True) or _source_rate(input_video) or Fraction(30)
+        ceiling = Fraction(cap if 0 < cap < 60 else 60).limit_denominator(1001)
+        target = min(rate, ceiling)
+        return ["-vf", f"fps={target.numerator}/{target.denominator}"]
     if cap <= 0:
         return []
     rate = _source_rate(input_video)
@@ -470,7 +479,7 @@ def cut_rate_filter(input_video):
     return ["-vf", f"fps={target.numerator}/{target.denominator}"]
 
 
-def cut_clip(input_video, clip_temp_path, start, end, clip_number):
+def cut_clip(input_video, clip_temp_path, start, end, clip_number, *, constant_rate=False):
     """Cut [start, end] out of the source into ``clip_temp_path``.
 
     Raises RuntimeError with ffmpeg's own stderr when the cut does not produce
@@ -489,7 +498,7 @@ def cut_clip(input_video, clip_temp_path, start, end, clip_number):
     session cannot allocate on a GPU that other jobs are filling.
     """
     encode_args = video_encode_args(INTERMEDIATE)
-    rate = cut_rate_filter(input_video)
+    rate = cut_rate_filter(input_video, constant_rate=constant_rate)
     command = [
         'ffmpeg', '-y',
         '-ss', str(start),

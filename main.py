@@ -3138,6 +3138,8 @@ if __name__ == '__main__':
             # --keep-original) or in uploads/ (upload jobs).
             clips_data['source_video'] = os.path.basename(input_video)
             clips_data['output_format'] = output_format
+            if args.local_shorts:
+                clips_data["local_shorts"] = True
             if source_subtitle_band:
                 clips_data['source_subtitle_band'] = source_subtitle_band
             metadata_file = os.path.join(output_dir, f"{video_title}_metadata.json")
@@ -3164,7 +3166,23 @@ if __name__ == '__main__':
 
                 try:
                     # ffmpeg cut — re-encoding for precision on strict seconds
-                    cut_clip(input_video, clip_temp_path, start, end, i + 1)
+                    cut_clip(input_video, clip_temp_path, start, end, i + 1,
+                             constant_rate=args.local_shorts)
+
+                    if args.local_shorts:
+                        # Each format can finish even if its partner fails. A
+                        # retry only renders the format still missing.
+                        if not clip.get("horizontal_file"):
+                            horizontal = os.path.join(output_dir, f"horizontal_clip_{i+1:02d}.mp4")
+                            try:
+                                render_inbox_horizontal(clip_temp_path, horizontal, transcript, start, end)
+                                if os.environ.get("WATERMARK") == "1":
+                                    horizontal = mark_delivery(horizontal)
+                                clip["horizontal_file"] = os.path.basename(horizontal)
+                            except Exception as exc:
+                                print(f"   ❌ Horizontal clip {i+1} failed: {exc}")
+                        if clip.get("vertical_file"):
+                            return bool(clip.get("horizontal_file"))
 
                     # Layer order: the canonical reframe stays CLEAN, the hook
                     # is a derived hooked_ file, captions go last on top of
@@ -3194,7 +3212,8 @@ if __name__ == '__main__':
                     # on, and the timeline they are laid on (its cuts); the
                     # canonical reframe stays, it is the clip's normal mode.
                     base_path, words, w_start, w_end = clip_final_path, transcript, start, end
-                    pro = pro_clip(clip_final_path, clip, transcript) if success else None
+                    pro = (pro_clip(clip_final_path, clip, transcript)
+                           if success and not args.local_shorts else None)
                     cap_style = None
                     if pro:
                         deliver_path = base_path = pro[0]
@@ -3235,12 +3254,8 @@ if __name__ == '__main__':
                         # announced, never one that ffmpeg is still writing.
                         print(f"CLIP_READY {i} {os.path.basename(served)}")
                         if args.local_shorts:
-                            horizontal = os.path.join(output_dir, f"horizontal_clip_{i+1:02d}.mp4")
-                            render_inbox_horizontal(clip_temp_path, horizontal, transcript, start, end)
-                            if os.environ.get("WATERMARK") == "1":
-                                horizontal = mark_delivery(horizontal)
-                            clip["horizontal_file"] = os.path.basename(horizontal)
-                    return success
+                            clip["vertical_file"] = os.path.basename(served)
+                    return success and (not args.local_shorts or bool(clip.get("horizontal_file")))
                 finally:
                     if os.path.exists(clip_temp_path):
                         os.remove(clip_temp_path)

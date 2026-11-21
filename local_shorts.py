@@ -152,11 +152,12 @@ class ShortsInbox:
         finally:
             await client.delete(url)
 
-    def _export(self, job_id, entry, clips):
+    def _export(self, job_id, entry, clips, selected_count=None):
         stem = re.sub(r"[^a-zA-Z0-9_-]+", "-", Path(entry["source"]).stem).strip("-_")
         folder = f"{stem[:60] or 'recording'}-{job_id[:12]}"
         export_dir = self.ready / folder
         job_dir = self.output / job_id
+        total = max(len(clips), selected_count or 0)
         records = []
         for index, clip in enumerate(clips, 1):
             filename = f"short-{index:02d}.mp4"
@@ -168,16 +169,17 @@ class ShortsInbox:
                 "score": clip.get("predicted_score"),
                 "method": clip.get("selection_method", "transcript"),
             }
-            # Copy the exact local file served by status (captioned if present).
+            wide_source = clip.get("horizontal_file")
+            # Status can use the wide file when only that orientation finished.
             parts = unquote(urlsplit(clip.get("video_url") or "").path).split("/")
             if (len(parts) == 4 and parts[:3] == ["", "videos", job_id]
-                    and "\\" not in parts[-1] and parts[-1].endswith(".mp4")):
+                    and parts[-1] != wide_source and "\\" not in parts[-1]
+                    and parts[-1].endswith(".mp4")):
                 vertical = f"vertical/{filename}"
                 duration = _copy_render(job_dir / parts[-1], export_dir / vertical,
                                         SHORTS_VERTICAL_SIZE)
                 if duration is not None:
                     record.update(file=vertical, duration=duration)
-            wide_source = clip.get("horizontal_file")
             if (isinstance(wide_source, str) and wide_source.endswith(".mp4")
                     and "/" not in wide_source and "\\" not in wide_source):
                 horizontal = f"horizontal/{filename}"
@@ -192,10 +194,10 @@ class ShortsInbox:
         write_json_atomic(export_dir / "clips.json", records, indent=2)
         paired = sum("file" in clip and "horizontal_file" in clip for clip in records)
         return {
-            "folder": folder, "status": "completed" if paired == len(clips) else "partial",
+            "folder": folder, "status": "completed" if paired == total else "partial",
             "clips": sum("file" in clip for clip in records),
             "horizontal_clips": sum("horizontal_file" in clip for clip in records),
-            "paired_clips": paired, "skipped": len(clips) - len(records),
+            "paired_clips": paired, "selected_clips": total, "skipped": total - len(records),
         }
 
     async def _tick(self, app, client, job_error):
@@ -218,7 +220,9 @@ class ShortsInbox:
 
             job = response.raise_for_status().json()
             if job["status"] == "completed":
-                exported = await asyncio.to_thread(self._export, active, entry, job["result"]["clips"])
+                result = job["result"]
+                exported = await asyncio.to_thread(
+                    self._export, active, entry, result["clips"], result.get("selected_clips"))
                 await self._record(active, **exported)
             elif job["status"] == "failed":
                 await self._record(active, status="failed", error=job_error(job["logs"])[-500:])

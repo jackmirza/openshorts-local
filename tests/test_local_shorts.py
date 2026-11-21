@@ -107,7 +107,7 @@ def test_reuses_a_submitted_job_after_restart_and_exports_playable_clips(inbox, 
             (job_folder / "horizontal.mp4").write_bytes(b"full frame")
             (job_folder / "rounded-portrait.mp4").write_bytes(b"wrong ratio")
             (job_folder / "too-short.mp4").write_bytes(b"short")
-            jobs[job_id] = {"status": "completed", "result": {"clips": [
+            jobs[job_id] = {"status": "completed", "result": {"selected_clips": 4, "clips": [
                 {"video_url": f"/videos/{job_id}/captioned.mp4", "start": 10, "end": 50,
                  "horizontal_file": "horizontal.mp4"},
                 {"video_url": f"/videos/{job_id}/rounded-portrait.mp4", "start": 52, "end": 92,
@@ -119,7 +119,8 @@ def test_reuses_a_submitted_job_after_restart_and_exports_playable_clips(inbox, 
             assert submissions == [job_id]
             record = restarted.jobs[job_id]
             assert (record["status"], record["clips"], record["horizontal_clips"],
-                    record["paired_clips"], record["skipped"]) == ("partial", 1, 2, 1, 1)
+                    record["paired_clips"], record["skipped"]) == ("partial", 1, 2, 1, 2)
+            assert record["selected_clips"] == 4
             folder = inbox.ready / record["folder"]
             assert (folder / "vertical" / "short-01.mp4").read_bytes() == b"captioned"
             assert (folder / "horizontal" / "short-01.mp4").read_bytes() == b"full frame"

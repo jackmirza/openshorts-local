@@ -16,6 +16,8 @@ scores, blank players, and 404 on download. Measured over the R2 archive on
 7-sep-2026: 195 of 1687 archived jobs held a metadata file and not one clip,
 across 184 users.
 """
+import asyncio
+import json
 import os
 
 import pytest
@@ -121,3 +123,35 @@ class TestPhantomClips:
 
         assert kept == []
         assert missing == 1
+
+
+def test_inbox_keeps_a_finished_landscape_through_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(app, "OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setattr(app, "BILLING_ENABLED", False)
+    monkeypatch.setattr(app, "jobs", {})
+    monkeypatch.setattr(app, "upload_job_artifacts", lambda *_: None)
+    job_id = "local-inbox-job"
+    job_dir = tmp_path / job_id
+    job_dir.mkdir()
+    _write(job_dir, "MKG_clip_1.mp4")  # an unfinished file with no ready marker
+    _write(job_dir, "horizontal_clip_01.mp4")
+    (job_dir / "MKG_metadata.json").write_text(json.dumps({
+        "local_shorts": True,
+        "shorts": [{**_clip("first"), "horizontal_file": "horizontal_clip_01.mp4"},
+                   _clip("second")],
+    }))
+    app.jobs[job_id] = {"logs": []}
+
+    async def finish():
+        app._finish_job(job_id, 0, str(job_dir))
+
+    asyncio.run(finish())
+    result = app.jobs[job_id]["result"]
+    assert app.jobs[job_id]["status"] == "completed"
+    assert result["selected_clips"] == 2
+    assert [c["video_url"] for c in result["clips"]] == [
+        f"/videos/{job_id}/horizontal_clip_01.mp4"]
+
+    app.jobs.clear()
+    app._recover_jobs_from_disk()
+    assert app.jobs[job_id]["result"] == result

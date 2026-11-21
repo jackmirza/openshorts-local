@@ -70,6 +70,14 @@ def test_the_cap_reaches_both_cut_commands(monkeypatch, tmp_path):
     assert cmd.index("-vf") > cmd.index("-i")          # an output option
 
 
+def test_inbox_normalizes_variable_timing_at_the_nominal_rate(monkeypatch):
+    rates = {"stream=avg_frame_rate": "18/1", "stream=r_frame_rate": "30/1"}
+    monkeypatch.setattr(ffmpeg_utils.subprocess, "check_output",
+                        lambda cmd, **kwargs: rates[cmd[cmd.index("-show_entries") + 1]])
+    assert ffmpeg_utils._source_rate("mixed.mp4") == Fraction(18)
+    assert ffmpeg_utils.cut_rate_filter("mixed.mp4", constant_rate=True) == ["-vf", "fps=30/1"]
+
+
 def test_only_free_jobs_get_the_cap(monkeypatch):
     import app
     monkeypatch.delenv("FREE_MAX_FPS", raising=False)
